@@ -64,6 +64,12 @@ async def _migrate_schema(
         )
         """
     )
+    await conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_user_devices_expires_at
+        ON user_devices(expires_at)
+        """
+    )
     cur = await conn.execute("PRAGMA table_info(user_devices)")
     ud_cols = {r[1] for r in await cur.fetchall()}
     if "expires_at" not in ud_cols:

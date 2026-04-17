@@ -73,6 +73,8 @@ DEVICE_LABEL_RU = {
 
 router = Router()
 SECONDS_PER_DAY = 86400
+MAX_REMINDER_INTERVAL_SEC = SECONDS_PER_DAY
+REMINDER_BATCH_LIMIT = 300
 
 
 def _subscription_reminder_days() -> list[int]:
@@ -99,7 +101,7 @@ def _subscription_reminder_check_interval_sec() -> int:
         v = int(os.getenv("SUBSCRIPTION_REMINDER_CHECK_INTERVAL_SEC", "3600"))
     except ValueError:
         return 3600
-    return max(60, min(v, 86400))
+    return max(60, min(v, MAX_REMINDER_INTERVAL_SEC))
 
 
 def _ru_days_label(days: int) -> str:
@@ -115,7 +117,7 @@ def _ru_days_label(days: int) -> str:
 
 
 def _format_expiry_for_user(expires_at: str | None) -> tuple[str, int | None]:
-    dt = _parse_utc_datetime(expires_at)
+    dt = parse_utc_datetime(expires_at)
     if dt is None:
         return "срок не указан", None
     now = datetime.now(timezone.utc)
@@ -390,7 +392,7 @@ async def _create_subscription_for_user(
 async def _send_subscription_reminder(
     bot: Bot, reminder: db.SubscriptionReminderRecord
 ) -> None:
-    expires_dt = _parse_utc_datetime(reminder.expires_at)
+    expires_dt = parse_utc_datetime(reminder.expires_at)
     now = datetime.now(timezone.utc)
     if reminder.days_before > 1:
         title = (
@@ -435,7 +437,7 @@ async def _subscription_reminder_worker(bot: Bot) -> None:
             reminders = await db.list_due_subscription_reminders(
                 days_before,
                 datetime.now(timezone.utc),
-                limit=300,
+                limit=REMINDER_BATCH_LIMIT,
             )
             for item in reminders:
                 try:
