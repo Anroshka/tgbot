@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import math
 import os
 import re
 import secrets
 import string
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -26,7 +29,7 @@ from aiogram.types import (
 from dotenv import load_dotenv
 
 import db
-from panel_api import PanelAPI, PanelAPIError
+from panel_api import PanelAPI, PanelAPIError, subscription_days
 from vpn_rules import RULES_TEXT
 from vpn_user_agreement import AGREEMENT_TEXT
 
@@ -68,6 +71,71 @@ DEVICE_LABEL_RU = {
 }
 
 router = Router()
+
+
+def _subscription_reminder_days() -> list[int]:
+    raw = os.getenv("SUBSCRIPTION_REMINDER_DAYS", "3,1,0").strip()
+    out: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            val = int(part)
+        except ValueError:
+            continue
+        if val < 0:
+            continue
+        out.add(val)
+    if not out:
+        return [3]
+    return sorted(out, reverse=True)
+
+
+def _subscription_reminder_check_interval_sec() -> int:
+    try:
+        v = int(os.getenv("SUBSCRIPTION_REMINDER_CHECK_INTERVAL_SEC", "3600"))
+    except ValueError:
+        return 3600
+    return max(60, min(v, 86400))
+
+
+def _parse_utc_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    text = text.replace("T", " ")
+    if "." in text:
+        text = text.split(".", 1)[0]
+    try:
+        dt = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        return dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+
+def _format_expiry_for_user(expires_at: str | None) -> tuple[str, int | None]:
+    dt = _parse_utc_datetime(expires_at)
+    if dt is None:
+        return "срок не указан", None
+    now = datetime.now(timezone.utc)
+    days_left = math.ceil((dt - now).total_seconds() / 86400)
+    stamp = dt.strftime("%d.%m.%Y %H:%M UTC")
+    if days_left > 1:
+        return f"до {stamp} (осталось {days_left} дн.)", days_left
+    if days_left == 1:
+        return f"до {stamp} (остался 1 день)", days_left
+    if days_left == 0:
+        return f"до {stamp} (заканчивается сегодня)", days_left
+    return f"до {stamp} (истекла)", days_left
 
 
 def _admin_id() -> int | None:
@@ -302,6 +370,9 @@ async def _create_subscription_for_user(
         return False, None, "Сейчас выдать ссылку нельзя. Напишите администратору."
     client_uuid = str(uuid.uuid4())
     sub = _sub_token()
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(days=subscription_days())
+    ).strftime("%Y-%m-%d %H:%M:%S")
     try:
         async with PanelAPI(PANEL_BASE_URL, PANEL_LOGIN, PANEL_PASSWORD) as api:
             await api.register_user_on_all_inbounds(base_email, client_uuid, sub)
@@ -316,9 +387,74 @@ async def _create_subscription_for_user(
         logger.exception("Неожиданная ошибка при регистрации tg_id=%s", tid)
         return False, None, "Что-то пошло не так. Попробуйте позже."
     await db.create_user_device(
-        tid, device_kind, slot_index, base_email, client_uuid, sub
+        tid, device_kind, slot_index, base_email, client_uuid, sub, expires_at
     )
     return True, sub, ""
+
+
+async def _send_subscription_reminder(
+    bot: Bot, reminder: db.SubscriptionReminderRecord
+) -> None:
+    expires_dt = _parse_utc_datetime(reminder.expires_at)
+    now = datetime.now(timezone.utc)
+    if reminder.days_before > 1:
+        title = f"⏰ Подписка закончится через {reminder.days_before} дня"
+    elif reminder.days_before == 1:
+        title = "⏰ Подписка закончится через 1 день"
+    elif expires_dt is not None and now > expires_dt:
+        title = "⏰ Срок подписки уже истёк"
+    else:
+        title = "⏰ Подписка заканчивается сегодня"
+    dev = _device_label_ru(reminder.device_kind)
+    if reminder.slot_index > 1:
+        dev += f" ({reminder.slot_index})"
+    expiry_text, _ = _format_expiry_for_user(reminder.expires_at)
+    text = (
+        f"{title}\n\n"
+        f"Устройство: {dev}\n"
+        f"Срок: {expiry_text}\n\n"
+        f"Ссылка на подписку:\n{_instruction_link(reminder.sub_token)}"
+    )
+    await bot.send_message(reminder.telegram_id, text)
+    await db.mark_subscription_reminder_sent(
+        reminder.telegram_id,
+        reminder.device_kind,
+        reminder.slot_index,
+        reminder.days_before,
+    )
+
+
+async def _subscription_reminder_worker(bot: Bot) -> None:
+    days_before = _subscription_reminder_days()
+    interval_sec = _subscription_reminder_check_interval_sec()
+    logger.info(
+        "Запущен воркер уведомлений подписок: дни=%s интервал=%sс",
+        days_before,
+        interval_sec,
+    )
+    while True:
+        try:
+            reminders = await db.list_due_subscription_reminders(
+                days_before,
+                datetime.now(timezone.utc),
+                limit=300,
+            )
+            for item in reminders:
+                try:
+                    await _send_subscription_reminder(bot, item)
+                except Exception:
+                    logger.exception(
+                        "Не удалось отправить напоминание tg=%s dev=%s slot=%s d=%s",
+                        item.telegram_id,
+                        item.device_kind,
+                        item.slot_index,
+                        item.days_before,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Ошибка воркера уведомлений подписок")
+        await asyncio.sleep(interval_sec)
 
 
 @router.message(CommandStart())
@@ -482,7 +618,10 @@ async def my_subscriptions(message: Message) -> None:
         label = _device_label_ru(d.device_kind)
         if d.slot_index > 1:
             label += f" ({d.slot_index})"
-        chunks.append(f"{label}\n{_instruction_link(d.sub_token)}")
+        expiry_text, _ = _format_expiry_for_user(d.expires_at)
+        chunks.append(
+            f"{label}\nСрок: {expiry_text}\n{_instruction_link(d.sub_token)}"
+        )
     await message.answer("Ваши ссылки на подписку:\n\n" + "\n\n".join(chunks))
 
 
@@ -696,7 +835,7 @@ async def main() -> None:
             "Укажите SUBSCRIPTION_PATH в .env — сегмент пути из URL подписки в настройках 3x-ui."
         )
 
-    await db.init_db()
+    await db.init_db(subscription_days())
     if _require_approval() and not _admin_ids():
         logger.warning(
             "REQUIRE_APPROVAL=1, но не заданы ADMINS/ADMIN_ID — заявки некому подтверждать"
@@ -704,8 +843,14 @@ async def main() -> None:
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
+    reminder_task = asyncio.create_task(_subscription_reminder_worker(bot))
     logger.info("Бот запущен")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        reminder_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reminder_task
 
 
 if __name__ == "__main__":
