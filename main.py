@@ -30,6 +30,7 @@ from dotenv import load_dotenv
 
 import db
 from panel_api import PanelAPI, PanelAPIError, subscription_days
+from time_utils import parse_utc_datetime
 from vpn_rules import RULES_TEXT
 from vpn_user_agreement import AGREEMENT_TEXT
 
@@ -71,6 +72,7 @@ DEVICE_LABEL_RU = {
 }
 
 router = Router()
+SECONDS_PER_DAY = 86400
 
 
 def _subscription_reminder_days() -> list[int]:
@@ -100,26 +102,16 @@ def _subscription_reminder_check_interval_sec() -> int:
     return max(60, min(v, 86400))
 
 
-def _parse_utc_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    text = value.strip()
-    if not text:
-        return None
-    text = text.replace("T", " ")
-    if "." in text:
-        text = text.split(".", 1)[0]
-    try:
-        dt = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
-        return dt.replace(tzinfo=timezone.utc)
-    except ValueError:
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
+def _ru_days_label(days: int) -> str:
+    n = abs(days) % 100
+    if 11 <= n <= 14:
+        return "дней"
+    n = n % 10
+    if n == 1:
+        return "день"
+    if n in (2, 3, 4):
+        return "дня"
+    return "дней"
 
 
 def _format_expiry_for_user(expires_at: str | None) -> tuple[str, int | None]:
@@ -127,10 +119,13 @@ def _format_expiry_for_user(expires_at: str | None) -> tuple[str, int | None]:
     if dt is None:
         return "срок не указан", None
     now = datetime.now(timezone.utc)
-    days_left = math.ceil((dt - now).total_seconds() / 86400)
+    days_left = math.ceil((dt - now).total_seconds() / SECONDS_PER_DAY)
     stamp = dt.strftime("%d.%m.%Y %H:%M UTC")
     if days_left > 1:
-        return f"до {stamp} (осталось {days_left} дн.)", days_left
+        return (
+            f"до {stamp} (осталось {days_left} {_ru_days_label(days_left)})",
+            days_left,
+        )
     if days_left == 1:
         return f"до {stamp} (остался 1 день)", days_left
     if days_left == 0:
@@ -398,7 +393,10 @@ async def _send_subscription_reminder(
     expires_dt = _parse_utc_datetime(reminder.expires_at)
     now = datetime.now(timezone.utc)
     if reminder.days_before > 1:
-        title = f"⏰ Подписка закончится через {reminder.days_before} дня"
+        title = (
+            "⏰ Подписка закончится через "
+            f"{reminder.days_before} {_ru_days_label(reminder.days_before)}"
+        )
     elif reminder.days_before == 1:
         title = "⏰ Подписка закончится через 1 день"
     elif expires_dt is not None and now > expires_dt:

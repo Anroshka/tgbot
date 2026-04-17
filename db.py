@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from time_utils import parse_utc_datetime
+
 logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).resolve().parent / "bot.db"
@@ -42,28 +44,6 @@ class AccessRequestRecord:
     base_email: str
     device_kind: str
     slot_index: int
-
-
-def _parse_utc_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    text = value.strip()
-    if not text:
-        return None
-    text = text.replace("T", " ")
-    if "." in text:
-        text = text.split(".", 1)[0]
-    try:
-        dt = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
-    return dt.replace(tzinfo=timezone.utc)
 
 
 async def _migrate_schema(
@@ -274,9 +254,12 @@ async def list_due_subscription_reminders(
     now_utc: datetime,
     limit: int = 100,
 ) -> list[SubscriptionReminderRecord]:
-    normalized_days = sorted(
-        {int(x) for x in days_before if int(x) >= 0}, reverse=True
-    )
+    normalized_values: set[int] = set()
+    for x in days_before:
+        val = int(x)
+        if val >= 0:
+            normalized_values.add(val)
+    normalized_days = sorted(normalized_values, reverse=True)
     if not normalized_days or limit <= 0:
         return []
     now = now_utc.astimezone(timezone.utc)
@@ -309,7 +292,7 @@ async def list_due_subscription_reminders(
     }
     due: list[SubscriptionReminderRecord] = []
     for row in devices:
-        expires = _parse_utc_datetime(row["expires_at"])
+        expires = parse_utc_datetime(row["expires_at"])
         if expires is None:
             continue
         key_base = (
