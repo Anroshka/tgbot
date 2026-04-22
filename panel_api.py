@@ -247,6 +247,76 @@ class PanelAPI:
             logger.error("addClient failed inbound=%s: %s", inbound_id, msg)
             raise PanelAPIError(f"Панель не создала клиента (inbound {inbound_id}): {msg}")
 
+    async def update_client(
+        self,
+        inbound_id: int,
+        client_uuid: str,
+        email: str,
+        sub_id: str,
+        protocol: str = "",
+        expiry_time_ms: int = 0,
+    ) -> None:
+        """Обновляет существующего клиента во inbound (меняет expiryTime и т.п.).
+
+        Эндпоинт 3x-ui: POST /panel/api/inbounds/updateClient/<clientId>,
+        где clientId — UUID для vless/vmess или password для trojan (у нас это одно и то же,
+        см. _client_json_for_protocol → add_client).
+        """
+        client = self._require_client()
+        client_row = self._client_json_for_protocol(
+            protocol, client_uuid, email, sub_id, expiry_time_ms, inbound_id
+        )
+        settings_obj = {"clients": [client_row]}
+        payload = {
+            "id": inbound_id,
+            "settings": json.dumps(settings_obj, separators=(",", ":")),
+        }
+        try:
+            r = await client.post(
+                f"/panel/api/inbounds/updateClient/{client_uuid}", json=payload
+            )
+        except httpx.RequestError as e:
+            logger.exception("updateClient inbound=%s: %s", inbound_id, e)
+            raise PanelAPIError("Сеть: не удалось связаться с панелью.") from e
+
+        logger.info(
+            "updateClient inbound=%s status=%s body=%s",
+            inbound_id,
+            r.status_code,
+            (r.text[:400] + "…") if len(r.text) > 400 else r.text,
+        )
+
+        if r.status_code != 200:
+            raise PanelAPIError(f"Панель вернула HTTP {r.status_code} для inbound {inbound_id}.")
+        try:
+            body = r.json()
+        except json.JSONDecodeError:
+            raise PanelAPIError(f"Некорректный JSON ответа updateClient (inbound {inbound_id}).")
+        if not body.get("success", False):
+            msg = body.get("msg", str(body))
+            logger.error("updateClient failed inbound=%s: %s", inbound_id, msg)
+            raise PanelAPIError(f"Панель не обновила клиента (inbound {inbound_id}): {msg}")
+
+    async def update_user_on_all_inbounds(
+        self,
+        base_email: str,
+        client_uuid: str,
+        sub_id: str,
+        expiry_time_ms: int,
+    ) -> None:
+        await self.login()
+        proto_map = await self._inbound_protocol_map()
+        for iid in INBOUND_IDS:
+            email = f"{base_email}_{iid}"
+            await self.update_client(
+                iid,
+                client_uuid,
+                email,
+                sub_id,
+                proto_map.get(iid, ""),
+                expiry_time_ms,
+            )
+
     async def register_user_on_all_inbounds(
         self,
         base_email: str,

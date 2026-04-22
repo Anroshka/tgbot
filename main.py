@@ -147,8 +147,6 @@ DEVICE_LABEL_RU = {
 REMINDER_3D_MS = 3 * 24 * 60 * 60 * 1000
 REMINDER_1D_MS = 1 * 24 * 60 * 60 * 1000
 REMINDER_CHECK_INTERVAL_SECONDS = 3600
-RENEWAL_NOTE = "Для продления напишите администратору. Он продлит подписку вручную и скажет срок."
-
 router = Router()
 
 
@@ -246,17 +244,45 @@ def _subscription_message_text(
     return "\n".join(lines)
 
 
-def _renewal_inline_keyboard() -> InlineKeyboardMarkup:
+def _renew_device_keyboard(device_kind: str, slot_index: int) -> InlineKeyboardMarkup:
+    """Кнопка «🔁 Продлить» под сообщением с конкретной подпиской устройства."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="🔁 Продлить",
-                    callback_data="renew:info",
-                ),
+                    callback_data=f"rnw_req:{device_kind}:{slot_index}",
+                )
             ]
         ]
     )
+
+
+def _renewal_review_keyboard(tid: int, device_kind: str, slot_index: int) -> InlineKeyboardMarkup:
+    """Клавиатура для админа: выбрать срок продления или отклонить."""
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for days in APPROVAL_DURATION_CHOICES:
+        row.append(
+            InlineKeyboardButton(
+                text=f"✅ {days} дн.",
+                callback_data=f"rnw_apr:{tid}:{device_kind}:{slot_index}:{days}",
+            )
+        )
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="❌ Отклонить",
+                callback_data=f"rnw_rej:{tid}:{device_kind}:{slot_index}",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _panel_base_email(nick: str, device_kind: str, slot_index: int) -> str:
@@ -569,26 +595,28 @@ async def _create_subscription_for_user(
 async def _send_subscription_reminder(bot: Bot, device: db.UserDeviceRecord, stage: str) -> bool:
     label = _device_subscription_label_from_parts(device.device_kind, device.slot_index)
     expiry = _format_expiry_time_ms(device.expiry_time_ms)
+    note = "Нажмите «🔁 Продлить», чтобы отправить заявку администратору."
     if stage == "3d":
         text = (
             f"Напоминание: подписка {label} закончится через 3 дня.\n"
             f"Окончание: {expiry}\n\n"
-            f"{RENEWAL_NOTE}"
+            f"{note}"
         )
     elif stage == "1d":
         text = (
             f"Напоминание: подписка {label} закончится через 1 день.\n"
             f"Окончание: {expiry}\n\n"
-            f"{RENEWAL_NOTE}"
+            f"{note}"
         )
     else:
         text = (
             f"Подписка {label} закончилась.\n"
             f"Окончание: {expiry}\n\n"
-            f"{RENEWAL_NOTE}"
+            f"{note}"
         )
+    kb = _renew_device_keyboard(device.device_kind, device.slot_index)
     try:
-        await bot.send_message(device.telegram_id, text)
+        await bot.send_message(device.telegram_id, text, reply_markup=kb)
     except Exception:
         logger.exception(
             "Не удалось отправить напоминание stage=%s tg_id=%s device=%s/%s",
@@ -804,27 +832,248 @@ async def my_subscriptions(message: Message) -> None:
             "Пока нет ссылок. Нажмите «Получить доступ», когда будете готовы."
         )
         return
-    chunks: list[str] = []
+    await message.answer(f"Ваши подписки ({len(devices)}):")
     for d in devices:
-        chunks.append(
-            _subscription_message_text(
-                _device_subscription_label_from_parts(d.device_kind, d.slot_index),
-                d.expiry_time_ms,
-                _all_links(d.sub_token),
-                RENEWAL_NOTE,
-            )
+        text = _subscription_message_text(
+            _device_subscription_label_from_parts(d.device_kind, d.slot_index),
+            d.expiry_time_ms,
+            _all_links(d.sub_token),
         )
-    await message.answer(
-        "Ваши подписки:\n\n" + "\n\n".join(chunks),
-        reply_markup=_renewal_inline_keyboard(),
+        await message.answer(
+            text,
+            reply_markup=_renew_device_keyboard(d.device_kind, d.slot_index),
+        )
+
+
+@router.callback_query(F.data.startswith("rnw_req:"))
+async def cb_renewal_request(query: CallbackQuery, bot: Bot) -> None:
+    """Пользователь нажал «🔁 Продлить» у конкретной подписки."""
+    if query.from_user is None or not query.data:
+        await query.answer()
+        return
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Некорректные данные.", show_alert=True)
+        return
+    _, device_kind, slot_raw = parts
+    try:
+        slot_index = int(slot_raw)
+    except ValueError:
+        await query.answer("Некорректные данные.", show_alert=True)
+        return
+
+    tid = query.from_user.id
+    device = await db.get_user_device(tid, device_kind, slot_index)
+    if device is None:
+        await query.answer("Подписка не найдена.", show_alert=True)
+        return
+
+    inserted = await db.try_insert_renewal_request(
+        tid,
+        device_kind,
+        slot_index,
+        query.from_user.username,
+        query.from_user.first_name,
+        query.from_user.last_name,
     )
+    if not inserted:
+        await query.answer(
+            "Заявка на продление уже отправлена. Ожидайте ответа администратора.",
+            show_alert=True,
+        )
+        return
 
+    req = await db.get_renewal_request(tid, device_kind, slot_index)
+    if req is not None:
+        await _notify_admins_renewal_request(bot, req)
 
-@router.callback_query(F.data == "renew:info")
-async def cb_renew_info(query: CallbackQuery) -> None:
     await query.answer()
     if query.message:
-        await query.message.answer(RENEWAL_NOTE)
+        await query.message.answer(
+            "Заявка на продление отправлена. Администратор свяжется с вами по оплате."
+        )
+
+
+async def _notify_admins_renewal_request(
+    bot: Bot, req: db.RenewalRequestRecord
+) -> None:
+    who_parts: list[str] = []
+    if req.username:
+        who_parts.append(f"@{req.username}")
+    name = " ".join(x for x in (req.first_name or "", req.last_name or "") if x).strip()
+    if name:
+        who_parts.append(name)
+    who = " / ".join(who_parts) if who_parts else "без имени"
+    text = (
+        "🔁 Запрос на продление\n"
+        f"Telegram ID: <code>{req.telegram_id}</code>\n"
+        f"Кто: {who}\n"
+        f"Устройство: {_device_label_ru(req.device_kind)} (слот {req.slot_index})\n"
+        f"Текущий срок: {_format_expiry_time_ms(req.current_expiry_time_ms)}\n\n"
+        "Напишите пользователю по оплате, затем выберите срок продления:"
+    )
+    kb = _renewal_review_keyboard(req.telegram_id, req.device_kind, req.slot_index)
+    for admin_id in _admin_ids():
+        try:
+            await bot.send_message(admin_id, text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            logger.exception(
+                "Не удалось отправить заявку на продление админу %s", admin_id
+            )
+
+
+async def _extend_subscription_for_user(
+    tid: int,
+    device_kind: str,
+    slot_index: int,
+    days: int,
+) -> tuple[bool, int | None, str]:
+    """Обновляет expiryTime одного и того же клиента на всех панелях и в БД.
+
+    Возвращает (успех, новый_expiry_time_ms, текст ошибки для админа).
+    """
+    device = await db.get_user_device(tid, device_kind, slot_index)
+    if device is None:
+        return False, None, "Подписка пользователя не найдена в БД."
+    if not _panels_configured():
+        return False, None, "Нет сконфигурированных панелей."
+
+    new_expiry_ms = expiry_time_ms_for_days(days)
+    for panel in PANELS:
+        if not panel.login or not panel.password or not panel.base_url:
+            continue
+        try:
+            async with PanelAPI(panel.base_url, panel.login, panel.password) as api:
+                await api.update_user_on_all_inbounds(
+                    device.base_email,
+                    device.uuid,
+                    device.sub_token,
+                    new_expiry_ms,
+                )
+        except PanelAPIError as e:
+            logger.warning(
+                "Продление: ошибка панели %s (%s) для tg_id=%s: %s",
+                panel.index, panel.name, tid, e,
+            )
+            return False, None, f"Ошибка панели «{panel.name}»: {e}"
+        except Exception:
+            logger.exception(
+                "Продление: неожиданная ошибка на панели %s для tg_id=%s",
+                panel.index, tid,
+            )
+            return False, None, f"Неожиданная ошибка на панели «{panel.name}»."
+
+    await db.extend_device_expiry(tid, device_kind, slot_index, new_expiry_ms)
+    return True, new_expiry_ms, ""
+
+
+@router.callback_query(F.data.startswith("rnw_apr:"))
+async def cb_renewal_approve(query: CallbackQuery, bot: Bot) -> None:
+    if not _is_admin(query.from_user.id if query.from_user else None):
+        await query.answer("Нет прав.", show_alert=True)
+        return
+    parts = (query.data or "").split(":")
+    if len(parts) != 5:
+        await query.answer("Некорректные данные.", show_alert=True)
+        return
+    try:
+        tid = int(parts[1])
+        device_kind = parts[2]
+        slot_index = int(parts[3])
+        days = int(parts[4])
+    except ValueError:
+        await query.answer("Некорректные данные.", show_alert=True)
+        return
+
+    pending = await db.get_renewal_request(tid, device_kind, slot_index)
+    if pending is None:
+        await query.answer("Заявка уже обработана или отозвана.", show_alert=True)
+        if query.message:
+            with suppress(Exception):
+                await query.message.edit_reply_markup(reply_markup=None)
+        return
+
+    ok, new_expiry_ms, err = await _extend_subscription_for_user(
+        tid, device_kind, slot_index, days
+    )
+    if not ok or new_expiry_ms is None:
+        await query.answer((err or "Ошибка")[:180], show_alert=True)
+        return
+
+    await db.delete_renewal_request(tid, device_kind, slot_index)
+    await query.answer(f"Продлено на {days} дн.")
+
+    label = _device_subscription_label_from_parts(device_kind, slot_index)
+    try:
+        await bot.send_message(
+            tid,
+            (
+                f"✅ Подписка продлена\n"
+                f"{label}\n"
+                f"Новый срок: {_format_expiry_time_ms(new_expiry_ms)}\n\n"
+                "Ссылка на подписку остаётся прежней — ничего перенастраивать не нужно."
+            ),
+        )
+    except Exception:
+        logger.exception("Не удалось уведомить пользователя %s о продлении", tid)
+
+    if query.message:
+        with suppress(Exception):
+            await query.message.edit_reply_markup(reply_markup=None)
+        with suppress(Exception):
+            await query.message.reply(
+                f"Продлено пользователю <code>{tid}</code> на {days} дн. "
+                f"до {_format_expiry_time_ms(new_expiry_ms)}.",
+                parse_mode="HTML",
+            )
+
+
+@router.callback_query(F.data.startswith("rnw_rej:"))
+async def cb_renewal_reject(query: CallbackQuery, bot: Bot) -> None:
+    if not _is_admin(query.from_user.id if query.from_user else None):
+        await query.answer("Нет прав.", show_alert=True)
+        return
+    parts = (query.data or "").split(":")
+    if len(parts) != 4:
+        await query.answer("Некорректные данные.", show_alert=True)
+        return
+    try:
+        tid = int(parts[1])
+        device_kind = parts[2]
+        slot_index = int(parts[3])
+    except ValueError:
+        await query.answer("Некорректные данные.", show_alert=True)
+        return
+
+    pending = await db.get_renewal_request(tid, device_kind, slot_index)
+    if pending is None:
+        await query.answer("Заявка уже не активна.", show_alert=True)
+        if query.message:
+            with suppress(Exception):
+                await query.message.edit_reply_markup(reply_markup=None)
+        return
+
+    await db.delete_renewal_request(tid, device_kind, slot_index)
+    await query.answer("Отклонено.")
+
+    label = _device_subscription_label_from_parts(device_kind, slot_index)
+    try:
+        await bot.send_message(
+            tid,
+            f"Запрос на продление ({label}) отклонён. "
+            "Если считаете это ошибкой — напишите администратору.",
+        )
+    except Exception:
+        logger.exception("Не удалось уведомить пользователя %s об отказе в продлении", tid)
+
+    if query.message:
+        with suppress(Exception):
+            await query.message.edit_reply_markup(reply_markup=None)
+        with suppress(Exception):
+            await query.message.reply(
+                f"Отказ в продлении пользователю <code>{tid}</code>.",
+                parse_mode="HTML",
+            )
 
 
 @router.callback_query(F.data.startswith("dev:"))
@@ -1039,10 +1288,12 @@ async def cmd_stats(message: Message) -> None:
     u = await db.count_distinct_subscribers()
     d = await db.count_devices()
     p = await db.count_pending_requests()
+    r = await db.count_pending_renewals()
     await message.answer(
         f"Уникальных пользователей: {u}\n"
         f"Всего конфигов (устройств): {d}\n"
-        f"Заявок в ожидании: {p}"
+        f"Заявок на доступ: {p}\n"
+        f"Заявок на продление: {r}"
     )
 
 

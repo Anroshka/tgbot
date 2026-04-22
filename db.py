@@ -27,6 +27,17 @@ class UserDeviceRecord:
 
 
 @dataclass(frozen=True)
+class RenewalRequestRecord:
+    telegram_id: int
+    username: str | None
+    first_name: str | None
+    last_name: str | None
+    device_kind: str
+    slot_index: int
+    current_expiry_time_ms: int | None
+
+
+@dataclass(frozen=True)
 class AccessRequestRecord:
     telegram_id: int
     username: str | None
@@ -109,6 +120,21 @@ async def _migrate_schema(conn: aiosqlite.Connection) -> None:
         await conn.execute(
             "ALTER TABLE access_requests ADD COLUMN slot_index INTEGER NOT NULL DEFAULT 1"
         )
+
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS renewal_requests (
+            telegram_id INTEGER NOT NULL,
+            device_kind TEXT NOT NULL,
+            slot_index INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (telegram_id, device_kind, slot_index)
+        )
+        """
+    )
 
     await conn.execute(
         """
@@ -446,3 +472,139 @@ async def set_agreement_accepted(telegram_id: int) -> None:
             (telegram_id,),
         )
         await db.commit()
+
+
+async def get_user_device(
+    telegram_id: int, device_kind: str, slot_index: int
+) -> UserDeviceRecord | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT telegram_id, device_kind, slot_index, base_email, uuid, sub_token,
+                   expiry_time_ms, reminder_3d_sent_at, reminder_1d_sent_at,
+                   expired_notified_at
+            FROM user_devices
+            WHERE telegram_id = ? AND device_kind = ? AND slot_index = ?
+            """,
+            (telegram_id, device_kind, slot_index),
+        )
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    return UserDeviceRecord(
+        telegram_id=row["telegram_id"],
+        device_kind=row["device_kind"],
+        slot_index=row["slot_index"],
+        base_email=row["base_email"],
+        uuid=row["uuid"],
+        sub_token=row["sub_token"],
+        expiry_time_ms=row["expiry_time_ms"],
+        reminder_3d_sent_at=row["reminder_3d_sent_at"],
+        reminder_1d_sent_at=row["reminder_1d_sent_at"],
+        expired_notified_at=row["expired_notified_at"],
+    )
+
+
+async def extend_device_expiry(
+    telegram_id: int, device_kind: str, slot_index: int, new_expiry_time_ms: int
+) -> None:
+    """Обновляет expiry_time_ms и сбрасывает флаги напоминаний (чтобы перед следующим
+    окончанием они снова сработали)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE user_devices
+            SET expiry_time_ms = ?,
+                reminder_3d_sent_at = NULL,
+                reminder_1d_sent_at = NULL,
+                expired_notified_at = NULL
+            WHERE telegram_id = ? AND device_kind = ? AND slot_index = ?
+            """,
+            (new_expiry_time_ms, telegram_id, device_kind, slot_index),
+        )
+        await db.commit()
+
+
+async def try_insert_renewal_request(
+    telegram_id: int,
+    device_kind: str,
+    slot_index: int,
+    username: str | None,
+    first_name: str | None,
+    last_name: str | None,
+) -> bool:
+    """True — новая заявка на продление. False — уже есть активная."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            SELECT 1 FROM renewal_requests
+            WHERE telegram_id = ? AND device_kind = ? AND slot_index = ?
+            """,
+            (telegram_id, device_kind, slot_index),
+        )
+        if await cur.fetchone():
+            return False
+        await db.execute(
+            """
+            INSERT INTO renewal_requests
+                (telegram_id, device_kind, slot_index, username, first_name, last_name)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (telegram_id, device_kind, slot_index, username, first_name, last_name),
+        )
+        await db.commit()
+    return True
+
+
+async def get_renewal_request(
+    telegram_id: int, device_kind: str, slot_index: int
+) -> RenewalRequestRecord | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT r.telegram_id, r.username, r.first_name, r.last_name,
+                   r.device_kind, r.slot_index, d.expiry_time_ms
+            FROM renewal_requests r
+            LEFT JOIN user_devices d
+              ON d.telegram_id = r.telegram_id
+             AND d.device_kind = r.device_kind
+             AND d.slot_index = r.slot_index
+            WHERE r.telegram_id = ? AND r.device_kind = ? AND r.slot_index = ?
+            """,
+            (telegram_id, device_kind, slot_index),
+        )
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    return RenewalRequestRecord(
+        telegram_id=row["telegram_id"],
+        username=row["username"],
+        first_name=row["first_name"],
+        last_name=row["last_name"],
+        device_kind=row["device_kind"],
+        slot_index=row["slot_index"],
+        current_expiry_time_ms=row["expiry_time_ms"],
+    )
+
+
+async def delete_renewal_request(
+    telegram_id: int, device_kind: str, slot_index: int
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            DELETE FROM renewal_requests
+            WHERE telegram_id = ? AND device_kind = ? AND slot_index = ?
+            """,
+            (telegram_id, device_kind, slot_index),
+        )
+        await db.commit()
+
+
+async def count_pending_renewals() -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM renewal_requests")
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
