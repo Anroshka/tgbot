@@ -1,4 +1,4 @@
-"""Клиент 3x-ui: логин и добавление клиента во inbound."""
+"""Клиент 3x-ui: логин, добавление/обновление/удаление клиента во inbound."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 INBOUND_IDS = (1, 2, 3, 4)
+
+
 def vless_flow_inbound_id() -> int:
     try:
         return int(os.getenv("VLESS_FLOW_INBOUND_ID", "1"))
@@ -47,6 +49,23 @@ def expiry_time_ms_for_days(days: int) -> int:
 
 class PanelAPIError(Exception):
     """Ошибка API панели или сети."""
+
+
+class PanelAPIClientNotFoundError(PanelAPIError):
+    """Клиент с таким UUID/email отсутствует на панели (нужно сделать addClient)."""
+
+
+def _looks_like_not_found(msg: str) -> bool:
+    low = (msg or "").lower()
+    markers = (
+        "not found",
+        "no client",
+        "does not exist",
+        "не найден",
+        "не существует",
+        "record not found",
+    )
+    return any(m in low for m in markers)
 
 
 class PanelAPI:
@@ -261,6 +280,9 @@ class PanelAPI:
         Эндпоинт 3x-ui: POST /panel/api/inbounds/updateClient/<clientId>,
         где clientId — UUID для vless/vmess или password для trojan (у нас это одно и то же,
         см. _client_json_for_protocol → add_client).
+
+        Бросает PanelAPIClientNotFoundError, если клиента на inbound нет — вызывающая
+        сторона может решить, делать ли addClient вместо падения всей операции.
         """
         client = self._require_client()
         client_row = self._client_json_for_protocol(
@@ -286,6 +308,10 @@ class PanelAPI:
             (r.text[:400] + "…") if len(r.text) > 400 else r.text,
         )
 
+        if r.status_code == 404:
+            raise PanelAPIClientNotFoundError(
+                f"HTTP 404 на updateClient inbound {inbound_id}"
+            )
         if r.status_code != 200:
             raise PanelAPIError(f"Панель вернула HTTP {r.status_code} для inbound {inbound_id}.")
         try:
@@ -295,7 +321,49 @@ class PanelAPI:
         if not body.get("success", False):
             msg = body.get("msg", str(body))
             logger.error("updateClient failed inbound=%s: %s", inbound_id, msg)
+            if _looks_like_not_found(msg):
+                raise PanelAPIClientNotFoundError(msg)
             raise PanelAPIError(f"Панель не обновила клиента (inbound {inbound_id}): {msg}")
+
+    async def delete_client(self, inbound_id: int, client_uuid: str) -> None:
+        """Удаляет клиента по UUID из указанного inbound.
+
+        Эндпоинт 3x-ui: POST /panel/api/inbounds/<inbound_id>/delClient/<uuid>
+        Отсутствующий клиент — не ошибка (тихо игнорируется).
+        """
+        client = self._require_client()
+        try:
+            r = await client.post(
+                f"/panel/api/inbounds/{inbound_id}/delClient/{client_uuid}"
+            )
+        except httpx.RequestError as e:
+            logger.exception("delClient inbound=%s: %s", inbound_id, e)
+            raise PanelAPIError("Сеть: не удалось связаться с панелью.") from e
+
+        logger.info(
+            "delClient inbound=%s status=%s body=%s",
+            inbound_id,
+            r.status_code,
+            (r.text[:400] + "…") if len(r.text) > 400 else r.text,
+        )
+        # 404 — клиента уже нет, считаем успехом.
+        if r.status_code == 404:
+            return
+        if r.status_code != 200:
+            raise PanelAPIError(
+                f"Панель вернула HTTP {r.status_code} для delClient inbound {inbound_id}."
+            )
+        try:
+            body = r.json()
+        except json.JSONDecodeError:
+            # На некоторых сборках 3x-ui в ответ приходит пустая строка — считаем успехом.
+            return
+        if not body.get("success", True):
+            msg = body.get("msg", str(body))
+            # Клиент отсутствует — тоже OK.
+            if _looks_like_not_found(msg):
+                return
+            raise PanelAPIError(f"Панель не удалила клиента (inbound {inbound_id}): {msg}")
 
     async def update_user_on_all_inbounds(
         self,
@@ -304,6 +372,11 @@ class PanelAPI:
         sub_id: str,
         expiry_time_ms: int,
     ) -> None:
+        """Только update — падает, если клиента нет на inbound.
+
+        Сохранён для обратной совместимости. Новый код должен использовать
+        upsert_user_on_all_inbounds, который «достраивает» старые подписки.
+        """
         await self.login()
         proto_map = await self._inbound_protocol_map()
         for iid in INBOUND_IDS:
@@ -316,6 +389,44 @@ class PanelAPI:
                 proto_map.get(iid, ""),
                 expiry_time_ms,
             )
+
+    async def upsert_user_on_all_inbounds(
+        self,
+        base_email: str,
+        client_uuid: str,
+        sub_id: str,
+        expiry_time_ms: int,
+    ) -> None:
+        """Обновляет клиента; если на каком-то inbound его нет — создаёт.
+
+        Используется для продления: на старых подписках клиент создан только на
+        одной панели, на остальных его нет — мы «достраиваем» до полной схемы 2-VPS.
+        """
+        await self.login()
+        proto_map = await self._inbound_protocol_map()
+        for iid in INBOUND_IDS:
+            email = f"{base_email}_{iid}"
+            try:
+                await self.update_client(
+                    iid,
+                    client_uuid,
+                    email,
+                    sub_id,
+                    proto_map.get(iid, ""),
+                    expiry_time_ms,
+                )
+            except PanelAPIClientNotFoundError:
+                logger.info(
+                    "upsert: клиент отсутствует на inbound=%s — создаю заново", iid
+                )
+                await self.add_client(
+                    iid,
+                    client_uuid,
+                    email,
+                    sub_id,
+                    proto_map.get(iid, ""),
+                    expiry_time_ms,
+                )
 
     async def register_user_on_all_inbounds(
         self,
@@ -337,3 +448,15 @@ class PanelAPI:
                 proto_map.get(iid, ""),
                 expiry_ms,
             )
+
+    async def delete_user_from_all_inbounds(self, client_uuid: str) -> None:
+        """Удаляет клиента со всех inbound. Отсутствующие — игнорируются."""
+        await self.login()
+        for iid in INBOUND_IDS:
+            try:
+                await self.delete_client(iid, client_uuid)
+            except PanelAPIError as e:
+                # Логируем, но продолжаем — цель revoke: максимально вычистить.
+                logger.warning(
+                    "delClient inbound=%s uuid=%s: %s", iid, client_uuid, e
+                )
