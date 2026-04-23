@@ -1,4 +1,4 @@
-"""SQLite: устройства пользователей, заявки на доступ."""
+"""SQLite: устройства пользователей, заявки на доступ, уведомления, аудит."""
 
 import aiosqlite
 import logging
@@ -46,6 +46,16 @@ class AccessRequestRecord:
     base_email: str
     device_kind: str
     slot_index: int
+
+
+@dataclass(frozen=True)
+class RenewalLogRecord:
+    telegram_id: int
+    device_kind: str
+    slot_index: int
+    days: int
+    action: str  # 'approved' | 'rejected' | 'admin_extend'
+    created_at: str
 
 
 async def _migrate_schema(conn: aiosqlite.Connection) -> None:
@@ -168,6 +178,37 @@ async def _migrate_schema(conn: aiosqlite.Connection) -> None:
         UPDATE terms_acceptance
         SET agreement_accepted_at = accepted_at
         WHERE agreement_accepted_at IS NULL AND accepted_at IS NOT NULL
+        """
+    )
+
+    # Хранение message_id последнего отправленного reminder — чтобы редактировать
+    # в месте, а не спамить тремя разными сообщениями (3d/1d/expired).
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reminder_messages (
+            telegram_id INTEGER NOT NULL,
+            device_kind TEXT NOT NULL,
+            slot_index INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            last_stage TEXT NOT NULL,
+            updated_at TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (telegram_id, device_kind, slot_index)
+        )
+        """
+    )
+
+    # Лог продлений/отказов админа — для /stats+ и /user.
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS renewal_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER NOT NULL,
+            device_kind TEXT NOT NULL,
+            slot_index INTEGER NOT NULL,
+            days INTEGER NOT NULL DEFAULT 0,
+            action TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
         """
     )
 
@@ -328,6 +369,25 @@ async def mark_subscription_notice_sent(
         await db.commit()
 
 
+async def reset_reminder_flags(
+    telegram_id: int, device_kind: str, slot_index: int
+) -> None:
+    """Сбрасывает флаги напоминаний — вызываем после успешного продления,
+    чтобы следующий цикл снова работал."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE user_devices
+            SET reminder_3d_sent_at = NULL,
+                reminder_1d_sent_at = NULL,
+                expired_notified_at = NULL
+            WHERE telegram_id = ? AND device_kind = ? AND slot_index = ?
+            """,
+            (telegram_id, device_kind, slot_index),
+        )
+        await db.commit()
+
+
 async def count_distinct_subscribers() -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
@@ -335,6 +395,34 @@ async def count_distinct_subscribers() -> int:
         )
         row = await cur.fetchone()
     return int(row[0]) if row else 0
+
+
+async def count_active_subscribers(now_ms: int) -> int:
+    """Сколько уникальных юзеров имеют хотя бы одну активную подписку."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            SELECT COUNT(DISTINCT telegram_id) FROM user_devices
+            WHERE expiry_time_ms IS NOT NULL AND expiry_time_ms > ?
+            """,
+            (now_ms,),
+        )
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+async def list_active_subscriber_ids(now_ms: int) -> list[int]:
+    """Список tg_id для /broadcast (кто имеет хотя бы одну активную подписку)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            SELECT DISTINCT telegram_id FROM user_devices
+            WHERE expiry_time_ms IS NOT NULL AND expiry_time_ms > ?
+            """,
+            (now_ms,),
+        )
+        rows = await cur.fetchall()
+    return [int(r[0]) for r in rows]
 
 
 async def count_devices() -> int:
@@ -349,6 +437,62 @@ async def count_pending_requests() -> int:
         cur = await db.execute("SELECT COUNT(*) FROM access_requests")
         row = await cur.fetchone()
     return int(row[0]) if row else 0
+
+
+async def list_pending_access_requests() -> list[AccessRequestRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT telegram_id, username, first_name, last_name, base_email,
+                   device_kind, slot_index
+            FROM access_requests
+            ORDER BY created_at ASC
+            """
+        )
+        rows = await cur.fetchall()
+    return [
+        AccessRequestRecord(
+            telegram_id=r["telegram_id"],
+            username=r["username"],
+            first_name=r["first_name"],
+            last_name=r["last_name"],
+            base_email=r["base_email"],
+            device_kind=r["device_kind"] or "other",
+            slot_index=int(r["slot_index"] or 1),
+        )
+        for r in rows
+    ]
+
+
+async def list_pending_renewal_requests() -> list[RenewalRequestRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT r.telegram_id, r.username, r.first_name, r.last_name,
+                   r.device_kind, r.slot_index, d.expiry_time_ms
+            FROM renewal_requests r
+            LEFT JOIN user_devices d
+              ON d.telegram_id = r.telegram_id
+             AND d.device_kind = r.device_kind
+             AND d.slot_index = r.slot_index
+            ORDER BY r.created_at ASC
+            """
+        )
+        rows = await cur.fetchall()
+    return [
+        RenewalRequestRecord(
+            telegram_id=r["telegram_id"],
+            username=r["username"],
+            first_name=r["first_name"],
+            last_name=r["last_name"],
+            device_kind=r["device_kind"],
+            slot_index=r["slot_index"],
+            current_expiry_time_ms=r["expiry_time_ms"],
+        )
+        for r in rows
+    ]
 
 
 async def get_access_request(telegram_id: int) -> AccessRequestRecord | None:
@@ -474,6 +618,23 @@ async def set_agreement_accepted(telegram_id: int) -> None:
         await db.commit()
 
 
+async def set_all_terms_accepted(telegram_id: int) -> None:
+    """Единым шагом принять правила + соглашение (новый UX с одним экраном)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO terms_acceptance
+                (telegram_id, accepted_at, agreement_accepted_at)
+            VALUES (?, datetime('now'), datetime('now'))
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                accepted_at = excluded.accepted_at,
+                agreement_accepted_at = excluded.agreement_accepted_at
+            """,
+            (telegram_id,),
+        )
+        await db.commit()
+
+
 async def get_user_device(
     telegram_id: int, device_kind: str, slot_index: int
 ) -> UserDeviceRecord | None:
@@ -524,6 +685,45 @@ async def extend_device_expiry(
             (new_expiry_time_ms, telegram_id, device_kind, slot_index),
         )
         await db.commit()
+
+
+async def delete_user_device(
+    telegram_id: int, device_kind: str, slot_index: int
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            DELETE FROM user_devices
+            WHERE telegram_id = ? AND device_kind = ? AND slot_index = ?
+            """,
+            (telegram_id, device_kind, slot_index),
+        )
+        await db.commit()
+
+
+async def delete_all_user_devices(telegram_id: int) -> int:
+    """Удаляет все устройства пользователя. Возвращает число удалённых."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM user_devices WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        row = await cur.fetchone()
+        n = int(row[0]) if row else 0
+        await db.execute(
+            "DELETE FROM user_devices WHERE telegram_id = ?", (telegram_id,)
+        )
+        await db.execute(
+            "DELETE FROM renewal_requests WHERE telegram_id = ?", (telegram_id,)
+        )
+        await db.execute(
+            "DELETE FROM access_requests WHERE telegram_id = ?", (telegram_id,)
+        )
+        await db.execute(
+            "DELETE FROM reminder_messages WHERE telegram_id = ?", (telegram_id,)
+        )
+        await db.commit()
+    return n
 
 
 async def try_insert_renewal_request(
@@ -606,5 +806,96 @@ async def delete_renewal_request(
 async def count_pending_renewals() -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT COUNT(*) FROM renewal_requests")
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+# ---- reminder_messages: единое сообщение-напоминание, редактируем вместо спама ----
+
+async def get_reminder_message_id(
+    telegram_id: int, device_kind: str, slot_index: int
+) -> tuple[int, str] | None:
+    """Возвращает (message_id, last_stage) или None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            SELECT message_id, last_stage FROM reminder_messages
+            WHERE telegram_id = ? AND device_kind = ? AND slot_index = ?
+            """,
+            (telegram_id, device_kind, slot_index),
+        )
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    return int(row[0]), str(row[1])
+
+
+async def upsert_reminder_message(
+    telegram_id: int,
+    device_kind: str,
+    slot_index: int,
+    message_id: int,
+    stage: str,
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO reminder_messages
+                (telegram_id, device_kind, slot_index, message_id, last_stage, updated_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(telegram_id, device_kind, slot_index) DO UPDATE SET
+                message_id = excluded.message_id,
+                last_stage = excluded.last_stage,
+                updated_at = excluded.updated_at
+            """,
+            (telegram_id, device_kind, slot_index, message_id, stage),
+        )
+        await db.commit()
+
+
+async def drop_reminder_message(
+    telegram_id: int, device_kind: str, slot_index: int
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            DELETE FROM reminder_messages
+            WHERE telegram_id = ? AND device_kind = ? AND slot_index = ?
+            """,
+            (telegram_id, device_kind, slot_index),
+        )
+        await db.commit()
+
+
+# ---- renewal_log: аудит продлений / отказов ----
+
+async def log_renewal_action(
+    telegram_id: int,
+    device_kind: str,
+    slot_index: int,
+    days: int,
+    action: str,
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO renewal_log
+                (telegram_id, device_kind, slot_index, days, action)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (telegram_id, device_kind, slot_index, days, action),
+        )
+        await db.commit()
+
+
+async def count_renewals_since(since_days: int, action: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            SELECT COUNT(*) FROM renewal_log
+            WHERE action = ? AND created_at >= datetime('now', ?)
+            """,
+            (action, f"-{int(since_days)} days"),
+        )
         row = await cur.fetchone()
     return int(row[0]) if row else 0
