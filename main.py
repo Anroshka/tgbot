@@ -37,8 +37,7 @@ from panel_api import (
     subscription_days,
     subscription_expiry_time_ms,
 )
-from vpn_rules import RULES_TEXT
-from vpn_user_agreement import AGREEMENT_TEXT
+from vpn_legal import LEGAL_TEXT
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -508,11 +507,11 @@ def _agreement_inline_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Подписать",
+                    text="✅ Принимаю всё",
                     callback_data="agr:yes",
                 ),
                 InlineKeyboardButton(
-                    text="❌ Отказаться",
+                    text="❌ Не согласен",
                     callback_data="agr:no",
                 ),
             ],
@@ -775,18 +774,9 @@ async def get_access(message: Message) -> None:
         return
 
     tid = message.from_user.id
-    if not await db.has_accepted_usage_rules(tid):
-        await message.answer(
-            RULES_TEXT
-            + "\n\nЧтобы продолжить, подтвердите согласие с правилами — кнопки ниже.",
-            reply_markup=_terms_inline_keyboard(),
-        )
-        return
-
     if not await db.has_accepted_user_agreement(tid):
         await message.answer(
-            AGREEMENT_TEXT
-            + "\n\nЧтобы продолжить, подтвердите согласие с пользовательским соглашением — кнопки ниже.",
+            LEGAL_TEXT,
             reply_markup=_agreement_inline_keyboard(),
         )
         return
@@ -837,13 +827,10 @@ async def cb_agreement_accept(query: CallbackQuery) -> None:
     if query.from_user is None:
         await query.answer()
         return
-    if not await db.has_accepted_usage_rules(query.from_user.id):
-        await query.answer(
-            "Сначала примите правила использования.", show_alert=True
-        )
-        return
+    # Принимаем сразу всё
+    await db.set_rules_accepted(query.from_user.id)
     await db.set_agreement_accepted(query.from_user.id)
-    await query.answer("Соглашение принято")
+    await query.answer("Условия приняты")
     if query.message:
         with suppress(Exception):
             await query.message.delete()
@@ -852,6 +839,44 @@ async def cb_agreement_accept(query: CallbackQuery) -> None:
             reply_markup=_device_inline_keyboard(),
             parse_mode="HTML",
         )
+
+
+@router.message(Command("broadcast_legal"))
+async def broadcast_legal_update(message: Message, bot: Bot) -> None:
+    if not _is_admin(message.from_user.id if message.from_user else None):
+        return
+
+    # 1. Сбрасываем флаги в БД
+    await db.reset_all_legal_acceptances()
+
+    # 2. Получаем список всех пользователей с устройствами
+    devices = await db.list_all_user_devices()
+    uids = {d.telegram_id for d in devices}
+
+    await message.answer(f"Начинаю рассылку для {len(uids)} пользователей...")
+
+    count = 0
+    for tid in uids:
+        try:
+            # Отправляем вводное сообщение
+            await bot.send_message(
+                tid,
+                "📢 <b>Обновление юридических документов</b>\n\n"
+                "Мы обновили Пользовательское соглашение и Правила использования Сервиса. "
+                "Для дальнейшего использования VPN вам необходимо ознакомиться и принять новые условия.",
+                parse_mode="HTML",
+            )
+            # Отправляем сам текст с кнопкой
+            await bot.send_message(
+                tid, LEGAL_TEXT, reply_markup=_agreement_inline_keyboard()
+            )
+            count += 1
+            # Небольшая пауза, чтобы не спамить API Telegram слишком быстро
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning("Не удалось отправить уведомление %s: %s", tid, e)
+
+    await message.answer(f"Рассылка завершена. Успешно отправлено: {count}.")
 
 
 @router.callback_query(F.data == "agr:no")
@@ -866,8 +891,8 @@ async def cb_agreement_decline(query: CallbackQuery) -> None:
         except Exception:
             pass
         await query.message.answer(
-            "Без принятия пользовательского соглашения оформить подписку нельзя. "
-            "Когда будете готовы — снова нажмите «Получить доступ»."
+            "Без принятия условий использование Сервиса невозможно. "
+            "Если передумаете — нажмите «Получить доступ»."
         )
 
 
@@ -977,8 +1002,9 @@ async def _extend_subscription_for_user(
     slot_index: int,
     days: int,
 ) -> tuple[bool, int | None, str]:
-    """Обновляет expiryTime одного и того же клиента на всех панелях и в БД.
+    """Обновляет expiryTime клиента на панелях, где он есть, и в БД.
 
+    Панель без нужных инбаундов или inbound без клиента не рвёт продление.
     Возвращает (успех, новый_expiry_time_ms, текст ошибки для админа).
     """
     device = await db.get_user_device(tid, device_kind, slot_index)
@@ -988,17 +1014,27 @@ async def _extend_subscription_for_user(
         return False, None, "Нет сконфигурированных панелей."
 
     new_expiry_ms = expiry_time_ms_for_days(days)
+    updated_inbounds = 0
     for panel in PANELS:
         if not panel.login or not panel.password or not panel.base_url:
             continue
         try:
             async with PanelAPI(panel.base_url, panel.login, panel.password) as api:
-                await api.update_user_on_all_inbounds(
+                n = await api.update_user_on_all_inbounds(
                     device.base_email,
                     device.uuid,
                     device.sub_token,
                     new_expiry_ms,
                 )
+                updated_inbounds += n
+                if n == 0:
+                    logger.info(
+                        "Продление: на панели %s (%s) для tg_id=%s ни один inbound "
+                        "не обновлён (нет совпадений или клиент отсутствует).",
+                        panel.index,
+                        panel.name,
+                        tid,
+                    )
         except PanelAPIError as e:
             logger.warning(
                 "Продление: ошибка панели %s (%s) для tg_id=%s: %s",
@@ -1011,6 +1047,14 @@ async def _extend_subscription_for_user(
                 panel.index, tid,
             )
             return False, None, f"Неожиданная ошибка на панели «{panel.name}»."
+
+    if updated_inbounds == 0:
+        return (
+            False,
+            None,
+            "Не удалось продлить: на доступных панелях нет клиента "
+            "ни в одном из ожидаемых inbound.",
+        )
 
     await db.extend_device_expiry(tid, device_kind, slot_index, new_expiry_ms)
     return True, new_expiry_ms, ""

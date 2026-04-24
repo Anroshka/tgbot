@@ -303,19 +303,40 @@ class PanelAPI:
         client_uuid: str,
         sub_id: str,
         expiry_time_ms: int,
-    ) -> None:
+    ) -> int:
+        """Продлевает клиента на инбаундах, где он есть на этой панели.
+
+        Пропускает отсутствующие на панели id из INBOUND_IDS и ошибки
+        update по отдельному inbound (нет клиента / отказ панели по одному id).
+
+        Возвращает число успешных update_client.
+        """
         await self.login()
         proto_map = await self._inbound_protocol_map()
+        ok = 0
         for iid in INBOUND_IDS:
+            if iid not in proto_map:
+                logger.debug("Продление: inbound %s нет на панели, пропуск.", iid)
+                continue
             email = f"{base_email}_{iid}"
-            await self.update_client(
-                iid,
-                client_uuid,
-                email,
-                sub_id,
-                proto_map.get(iid, ""),
-                expiry_time_ms,
-            )
+            try:
+                await self.update_client(
+                    iid,
+                    client_uuid,
+                    email,
+                    sub_id,
+                    proto_map.get(iid, ""),
+                    expiry_time_ms,
+                )
+                ok += 1
+            except PanelAPIError as e:
+                logger.warning(
+                    "Продление: не обновлён inbound %s на панели (%s): %s",
+                    iid,
+                    self._base,
+                    e,
+                )
+        return ok
 
     async def register_user_on_all_inbounds(
         self,

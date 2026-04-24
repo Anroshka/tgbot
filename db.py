@@ -474,6 +474,15 @@ async def set_agreement_accepted(telegram_id: int) -> None:
         await db.commit()
 
 
+async def reset_all_legal_acceptances() -> None:
+    """Сбрасывает согласие с правилами для всех пользователей."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE terms_acceptance SET agreement_accepted_at = NULL, accepted_at = NULL"
+        )
+        await db.commit()
+
+
 async def get_user_device(
     telegram_id: int, device_kind: str, slot_index: int
 ) -> UserDeviceRecord | None:
