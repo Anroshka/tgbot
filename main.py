@@ -841,8 +841,65 @@ async def cb_agreement_accept(query: CallbackQuery) -> None:
         )
 
 
-@router.message(Command("broadcast_legal"))
-async def broadcast_legal_update(message: Message, bot: Bot) -> None:
+@router.message(Command("admin_users"))
+async def admin_list_users(message: Message) -> None:
+    if not _is_admin(message.from_user.id if message.from_user else None):
+        return
+
+    users = await db.list_users_legal_status()
+    if not users:
+        await message.answer("Пользователей пока нет.")
+        return
+
+    lines = ["<b>Список пользователей и статус:</b>\n"]
+    for u in users:
+        status = "✅ Подписал" if u["accepted"] else "❌ Не подписал"
+        devices = f"({u['devices']} устр.)" if u["devices"] > 0 else "(нет подписок)"
+        # Попробуем достать имя из недавних заявок или просто ID
+        line = f"• <code>{u['tid']}</code>: {status} {devices}"
+        lines.append(line)
+
+    # Разбиваем на части, если список слишком длинный
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        for i in range(0, len(lines), 50):
+            chunk = "\n".join(lines[i:i+50])
+            await message.answer(chunk, parse_mode="HTML")
+    else:
+        await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("user_info"))
+async def admin_user_info(message: Message) -> None:
+    if not _is_admin(message.from_user.id if message.from_user else None):
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Использование: <code>/user_info [telegram_id]</code>", parse_mode="HTML")
+        return
+
+    try:
+        target_tid = int(parts[1])
+    except ValueError:
+        await message.answer("Некорректный ID.")
+        return
+
+    devices = await db.list_user_devices(target_tid)
+    if not devices:
+        await message.answer(f"У пользователя <code>{target_tid}</code> нет активных подписок.", parse_mode="HTML")
+        return
+
+    lines = [f"<b>Подписки пользователя <code>{target_tid}</code>:</b>\n"]
+    for d in devices:
+        label = _device_subscription_label_from_parts(d.device_kind, d.slot_index)
+        expiry = _format_expiry_time_ms(d.expiry_time_ms)
+        lines.append(f"🔹 {label}")
+        lines.append(f"   Срок: {expiry}")
+        lines.append(f"   Email: <code>{d.base_email}_{d.slot_index}</code>")
+        lines.append(f"   UUID: <code>{d.uuid}</code>\n")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
     if not _is_admin(message.from_user.id if message.from_user else None):
         return
 
