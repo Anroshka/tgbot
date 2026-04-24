@@ -855,8 +855,12 @@ async def admin_list_users(message: Message) -> None:
     for u in users:
         status = "✅ Подписал" if u["accepted"] else "❌ Не подписал"
         devices = f"({u['devices']} устр.)" if u["devices"] > 0 else "(нет подписок)"
-        # Попробуем достать имя из недавних заявок или просто ID
-        line = f"• <code>{u['tid']}</code>: {status} {devices}"
+        
+        user_display = f"<code>{u['tid']}</code>"
+        if u["username"]:
+            user_display = f"@{u['username']} ({user_display})"
+            
+        line = f"• {user_display}: {status} {devices}"
         lines.append(line)
 
     # Разбиваем на части, если список слишком длинный

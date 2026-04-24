@@ -338,16 +338,21 @@ async def count_distinct_subscribers() -> int:
 
 
 async def list_users_legal_status() -> list[dict]:
-    """Возвращает список всех пользователей с их статусом принятия правил."""
+    """Возвращает список всех пользователей с их статусом принятия правил и ником."""
     async with aiosqlite.connect(DB_PATH) as db:
         # Собираем всех, кто есть в user_devices или terms_acceptance
+        # Пытаемся достать username из renewal_requests или access_requests
         cur = await db.execute(
             """
             SELECT 
                 u.telegram_id, 
                 t.accepted_at, 
                 t.agreement_accepted_at,
-                (SELECT COUNT(*) FROM user_devices WHERE telegram_id = u.telegram_id) as device_count
+                (SELECT COUNT(*) FROM user_devices WHERE telegram_id = u.telegram_id) as device_count,
+                COALESCE(
+                    (SELECT username FROM renewal_requests WHERE telegram_id = u.telegram_id LIMIT 1),
+                    (SELECT username FROM access_requests WHERE telegram_id = u.telegram_id LIMIT 1)
+                ) as username
             FROM (
                 SELECT telegram_id FROM user_devices
                 UNION
@@ -361,7 +366,8 @@ async def list_users_legal_status() -> list[dict]:
             {
                 "tid": r[0],
                 "accepted": r[1] is not None and r[2] is not None,
-                "devices": r[3]
+                "devices": r[3],
+                "username": r[4]
             } for r in rows
         ]
 
