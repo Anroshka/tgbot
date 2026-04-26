@@ -274,13 +274,11 @@ async def cb_admin_reject(query: CallbackQuery, bot: Bot) -> None:
         await query.answer("Неверные данные.", show_alert=True)
         return
 
-    pending = await db.get_access_request(tid)
-    if pending is None:
+    # Атомарный claim: исключаем гонку с одновременным «одобрить» от другого админа.
+    if not await db.try_claim_access_request(tid):
         await query.answer("Заявка уже не активна.", show_alert=True)
         await safe_clear_markup(query)
         return
-
-    await db.delete_access_request(tid)
     await query.answer("Отклонено.")
 
     try:

@@ -152,13 +152,11 @@ async def cb_renewal_reject(query: CallbackQuery, bot: Bot) -> None:
         await query.answer("Некорректные данные.", show_alert=True)
         return
 
-    pending = await db.get_renewal_request(tid, device_kind, slot_index)
-    if pending is None:
+    # Атомарный claim: исключаем гонку с одновременным «одобрить» от другого админа.
+    if not await db.try_claim_renewal_request(tid, device_kind, slot_index):
         await query.answer("Заявка уже не активна.", show_alert=True)
         await safe_clear_markup(query)
         return
-
-    await db.delete_renewal_request(tid, device_kind, slot_index)
     await query.answer("Отклонено.")
 
     label = device_subscription_label(device_kind, slot_index)
