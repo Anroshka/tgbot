@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import html
 import logging
 import os
@@ -182,6 +182,7 @@ DEVICE_LABEL_RU = {
 REMINDER_3D_MS = 3 * 24 * 60 * 60 * 1000
 REMINDER_1D_MS = 1 * 24 * 60 * 60 * 1000
 REMINDER_CHECK_INTERVAL_SECONDS = 3600
+MSK_TZ = timezone(timedelta(hours=3), "МСК")
 router = Router()
 
 
@@ -260,7 +261,21 @@ def _format_expiry_time_ms(expiry_time_ms: int | None) -> str:
     if expiry_time_ms is None:
         return "неизвестно"
     expiry = datetime.fromtimestamp(expiry_time_ms / 1000, tz=timezone.utc)
-    return expiry.strftime("%d.%m.%Y %H:%M UTC")
+    expiry = expiry.astimezone(MSK_TZ)
+    return expiry.strftime("%d.%m.%Y")
+
+
+def _subscription_status(expiry_time_ms: int | None) -> tuple[str, str]:
+    if expiry_time_ms is None:
+        return "⚪️", "срок неизвестен"
+    remaining_ms = expiry_time_ms - int(datetime.now(timezone.utc).timestamp() * 1000)
+    if remaining_ms <= 0:
+        return "🔴", "истекла"
+    day_ms = 24 * 60 * 60 * 1000
+    days_left = max(1, (remaining_ms + day_ms - 1) // day_ms)
+    if days_left <= 3:
+        return "🟠", f"осталось {days_left} дн."
+    return "🟢", f"осталось {days_left} дн."
 
 
 def _device_subscription_label_from_parts(device_kind: str, slot_index: int) -> str:
@@ -277,10 +292,8 @@ def _subscription_message_text(
     renewal_note: str = "",
 ) -> str:
     """links: список (название_сервера, ссылка). Если панель одна — заголовок сервера не печатается."""
-    header = (
-        f"{device_label}\n"
-        f"Подписка действует до: {_format_expiry_time_ms(expiry_time_ms)}"
-    )
+    _, status = _subscription_status(expiry_time_ms)
+    header = f"{device_label}\nДействует до: {_format_expiry_time_ms(expiry_time_ms)} · {status}"
     lines: list[str] = [header, ""]
     if len(links) == 1:
         if SUBSCRIPTION_PORTAL_BASE:
@@ -467,8 +480,8 @@ def _greeting_name(user: User | None) -> str:
 
 def _main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     keyboard = [
-        [KeyboardButton(text="Получить доступ")],
-        [KeyboardButton(text="Мои подписки")],
+        [KeyboardButton(text="Личный кабинет")],
+        [KeyboardButton(text="Получить доступ"), KeyboardButton(text="Мои подписки")],
     ]
     if is_admin:
         keyboard.append([KeyboardButton(text="Админ-панель")])
@@ -494,17 +507,16 @@ def _device_inline_keyboard() -> InlineKeyboardMarkup:
 
 
 def _device_selection_text() -> str:
-    """Текст перед выбором устройства (оплата + тариф при модели с заявкой админу)."""
+    """Текст перед выбором условного профиля подписки."""
     if _require_approval():
         return (
-            "💳 <b>Как проходит оплата</b>\n\n"
-            "Выберите тип устройства ниже — заявку получит администратор. "
-            "Он напишет вам здесь, в Telegram, и пришлёт реквизиты для перевода.\n\n"
-            "Стоимость доступа — <b>80 ₽</b> на <b>30 дней</b>. После перевода "
-            "администратор подтвердит оплату и вы получите ссылку на подписку.\n\n"
-            "<b>Шаг 1 — выберите устройство:</b>"
+            "🧾 <b>Заявка на доступ</b>\n\n"
+            "Выберите профиль ниже. После этого заявка уйдёт администратору — "
+            "он сам свяжется с вами в Telegram и всё подскажет.\n\n"
+            "Инструкция для подключения будет на сайте по вашей персональной ссылке.\n\n"
+            "<b>Выберите профиль:</b>"
         )
-    return "Выберите устройство, для которого нужна ссылка:"
+    return "Выберите профиль, для которого нужна ссылка:"
 
 
 def _terms_inline_keyboard() -> InlineKeyboardMarkup:
@@ -529,7 +541,13 @@ def _agreement_inline_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Принимаю всё",
+                    text="📄 Открыть правила",
+                    callback_data="agr:show",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✅ Принимаю правила",
                     callback_data="agr:yes",
                 ),
                 InlineKeyboardButton(
@@ -568,6 +586,50 @@ def _access_review_keyboard(target_telegram_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _cabinet_keyboard(has_devices: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text="➕ Получить доступ",
+                callback_data="cab:get_access",
+            )
+        ]
+    ]
+    if has_devices:
+        rows.insert(
+            0,
+            [
+                InlineKeyboardButton(
+                    text="🔗 Показать ссылки",
+                    callback_data="cab:links",
+                )
+            ],
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="📄 Правила сервиса",
+                callback_data="agr:show",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _link_keyboard(url: str, device_kind: str, slot_index: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🌐 Открыть инструкцию", url=url)],
+            [
+                InlineKeyboardButton(
+                    text="🔁 Продлить",
+                    callback_data=f"rnw_req:{device_kind}:{slot_index}",
+                )
+            ],
+        ]
+    )
+
+
 def _format_request_who(req: db.AccessRequestRecord) -> str:
     return _format_user_name(req.username, req.first_name, req.last_name)
 
@@ -595,6 +657,61 @@ async def _admin_dashboard_text() -> str:
     )
 
 
+async def _user_cabinet_text(user: User | None) -> tuple[str, bool]:
+    if user is None:
+        return "Не удалось открыть кабинет. Попробуйте ещё раз.", False
+
+    devices = await db.list_user_devices(user.id)
+    pending_access = await db.get_access_request(user.id)
+    name = _greeting_name(user)
+
+    lines = [
+        f"👋 <b>{html.escape(name)}, ваш личный кабинет</b>",
+        "",
+    ]
+
+    if pending_access:
+        lines.extend(
+            [
+                "🟡 <b>Заявка на доступ уже отправлена</b>",
+                "Администратор свяжется с вами в Telegram. После подтверждения ссылка придёт сюда.",
+                "",
+            ]
+        )
+
+    if not devices:
+        lines.extend(
+            [
+                "VPN пока не подключён.",
+                "Нажмите «Получить доступ» — заявка уйдёт администратору.",
+            ]
+        )
+        return "\n".join(lines), False
+
+    active_count = 0
+    expired_count = 0
+    lines.append(f"🔐 <b>Подписки: {len(devices)}</b>")
+    for i, d in enumerate(devices, start=1):
+        icon, status = _subscription_status(d.expiry_time_ms)
+        if icon == "🔴":
+            expired_count += 1
+        else:
+            active_count += 1
+        label = _device_subscription_label_from_parts(d.device_kind, d.slot_index)
+        lines.append(
+            f"{i}. {icon} {label} — до {_format_expiry_time_ms(d.expiry_time_ms)}, {status}"
+        )
+
+    lines.extend(
+        [
+            "",
+            f"Активных: <b>{active_count}</b> · Истекших: <b>{expired_count}</b>",
+            "Чтобы открыть инструкции и персональные ссылки, нажмите «Показать ссылки».",
+        ]
+    )
+    return "\n".join(lines), True
+
+
 async def _notify_admins_new_request(bot: Bot, req: db.AccessRequestRecord) -> None:
     text = (
         "📩 <b>Запрос доступа к VPN</b>\n"
@@ -603,7 +720,7 @@ async def _notify_admins_new_request(bot: Bot, req: db.AccessRequestRecord) -> N
         f"Устройство: {_device_label_ru(req.device_kind)}"
         f" (слот {req.slot_index})\n"
         f"Префикс email в панели: <code>{req.base_email}</code>\n\n"
-        "Проверьте оплату и выберите срок подписки или отклоните заявку.\n"
+        "Свяжитесь с пользователем и выберите срок подписки или отклоните заявку.\n"
         "Вся очередь: /pending"
     )
     kb = _access_review_keyboard(req.telegram_id)
@@ -768,34 +885,20 @@ async def _subscription_reminder_worker(bot: Bot) -> None:
 
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
-    name = _greeting_name(message.from_user)
     is_admin = _is_admin(message.from_user.id if message.from_user else None)
-    approval_note = (
-        "\n\nЗаявку перед выдачей может подтвердить администратор — ссылка придёт в этот чат."
-        if _require_approval()
-        else ""
+    text, has_devices = await _user_cabinet_text(message.from_user)
+    if is_admin:
+        text += "\n\nДля администратора: /admin"
+    await message.answer(
+        text,
+        reply_markup=_main_keyboard(is_admin),
+        parse_mode="HTML",
     )
-    admin_note = (
-        "\n\nДля администратора: /admin — панель управления и очередь заявок."
-        if is_admin
-        else ""
+    await message.answer(
+        "Выберите действие:",
+        reply_markup=_cabinet_keyboard(has_devices),
+        parse_mode="HTML",
     )
-    text = (
-        f"⚡️ Добро пожаловать, {name}, в Vibecode VPN!\n"
-        "Твой личный доступ к свободному интернету — быстрый, стабильный и честный.\n\n"
-        "Наши условия:\n\n"
-        "Цена: всего 80 руб / месяц.\n\n"
-        "Устройства: подключай любое количество гаджетов без доплат.\n\n"
-        "Трафик: комфортный объем для повседневного использования.\n\n"
-        "⚠️ Важное требование:\n\n"
-        "Для корректной работы сервиса обязательна настройка раздельного туннелирования "
-        "(Split Tunneling). Это позволит VPN работать только в нужных приложениях, "
-        "сохраняя высокую скорость для остальных."
-        f"{approval_note}{admin_note}\n\n"
-        "Готов начать?\n"
-        "Нажми кнопку ниже, чтобы получить конфиг и инструкцию по настройке."
-    )
-    await message.answer(text, reply_markup=_main_keyboard(is_admin))
 
 
 @router.message(Command("admin"))
@@ -805,6 +908,34 @@ async def admin_dashboard(message: Message) -> None:
         await message.answer("Команда только для администратора.")
         return
     await message.answer(await _admin_dashboard_text(), parse_mode="HTML")
+
+
+@router.message(F.text == "Личный кабинет")
+async def user_cabinet(message: Message) -> None:
+    text, has_devices = await _user_cabinet_text(message.from_user)
+    await message.answer(
+        text,
+        reply_markup=_cabinet_keyboard(has_devices),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "cab:get_access")
+async def cb_cabinet_get_access(query: CallbackQuery) -> None:
+    await query.answer()
+    if query.message:
+        await query.message.answer(
+            _device_selection_text(),
+            reply_markup=_device_inline_keyboard(),
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(F.data == "cab:links")
+async def cb_cabinet_links(query: CallbackQuery) -> None:
+    await query.answer()
+    if query.message:
+        await _send_user_subscription_links(query.message, query.from_user)
 
 
 @router.message(Command("pending"))
@@ -866,6 +997,42 @@ async def admin_pending_requests(message: Message) -> None:
         )
 
 
+async def _send_user_subscription_links(message: Message, user: User | None) -> None:
+    if user is None:
+        return
+    devices = await db.list_user_devices(user.id)
+    if not devices:
+        await message.answer(
+            "Пока нет активных ссылок. Нажмите «Получить доступ», когда будете готовы."
+        )
+        return
+
+    await message.answer(
+        f"🔗 <b>Ваши ссылки: {len(devices)}</b>\n"
+        "Ниже — отдельные карточки с кнопкой инструкции. "
+        "Основной обзор остаётся в «Личном кабинете».",
+        parse_mode="HTML",
+    )
+    for i, d in enumerate(devices, start=1):
+        links = _all_links(d.sub_token)
+        primary_url = links[0][1]
+        icon, status = _subscription_status(d.expiry_time_ms)
+        label = _device_subscription_label_from_parts(d.device_kind, d.slot_index)
+        text = (
+            f"{icon} <b>{i}. {label}</b>\n"
+            f"Действует до: <b>{_format_expiry_time_ms(d.expiry_time_ms)}</b>\n"
+            f"Статус: {status}\n\n"
+            "Инструкция и подключение открываются по кнопке ниже."
+        )
+        if len(links) > 1:
+            text += "\n\n" + "\n".join(f"{name}: {link}" for name, link in links[1:])
+        await message.answer(
+            text,
+            reply_markup=_link_keyboard(primary_url, d.device_kind, d.slot_index),
+            parse_mode="HTML",
+        )
+
+
 @router.message(F.text == "Получить доступ")
 async def get_access(message: Message) -> None:
     if message.from_user is None:
@@ -882,18 +1049,19 @@ async def get_access(message: Message) -> None:
     if await db.get_access_request(message.from_user.id):
         await message.answer(
             "Мы уже получили вашу заявку.\n\n"
-            "Что дальше:\n"
-            "1. Администратор проверит оплату.\n"
-            "2. После подтверждения ссылка на подписку придёт сюда.\n"
-            "3. Если нужно ускорить проверку — напишите администратору."
+            "Ожидайте: администратор свяжется с вами в Telegram. "
+            "После подтверждения ссылка на подписку придёт сюда."
         )
         return
 
     tid = message.from_user.id
     if not await db.has_accepted_user_agreement(tid):
         await message.answer(
-            LEGAL_TEXT,
+            "📄 <b>Перед заявкой нужно принять правила сервиса</b>\n\n"
+            "Полный текст можно открыть отдельной кнопкой. "
+            "Если всё понятно — нажмите «Принимаю правила».",
             reply_markup=_agreement_inline_keyboard(),
+            parse_mode="HTML",
         )
         return
 
@@ -935,6 +1103,16 @@ async def cb_terms_decline(query: CallbackQuery) -> None:
         await query.message.answer(
             "Пока вы не примете правила, оформить подписку нельзя. "
             "Когда будете готовы — снова нажмите «Получить доступ»."
+        )
+
+
+@router.callback_query(F.data == "agr:show")
+async def cb_agreement_show(query: CallbackQuery) -> None:
+    await query.answer()
+    if query.message:
+        await query.message.answer(
+            LEGAL_TEXT,
+            reply_markup=_agreement_inline_keyboard(),
         )
 
 
@@ -1123,23 +1301,12 @@ async def cb_agreement_decline(query: CallbackQuery) -> None:
 async def my_subscriptions(message: Message) -> None:
     if message.from_user is None:
         return
-    devices = await db.list_user_devices(message.from_user.id)
-    if not devices:
-        await message.answer(
-            "Пока нет ссылок. Нажмите «Получить доступ», когда будете готовы."
-        )
-        return
-    await message.answer(f"Ваши подписки ({len(devices)}):")
-    for d in devices:
-        text = _subscription_message_text(
-            _device_subscription_label_from_parts(d.device_kind, d.slot_index),
-            d.expiry_time_ms,
-            _all_links(d.sub_token),
-        )
-        await message.answer(
-            text,
-            reply_markup=_renew_device_keyboard(d.device_kind, d.slot_index),
-        )
+    text, has_devices = await _user_cabinet_text(message.from_user)
+    await message.answer(
+        text,
+        reply_markup=_cabinet_keyboard(has_devices),
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data.startswith("rnw_req:"))
@@ -1188,8 +1355,8 @@ async def cb_renewal_request(query: CallbackQuery, bot: Bot) -> None:
     if query.message:
         await query.message.answer(
             "Заявка на продление отправлена.\n\n"
-            "Администратор свяжется с вами по оплате. После подтверждения срок обновится, "
-            "а ссылка останется прежней."
+            "Ожидайте: администратор свяжется с вами в Telegram. "
+            "После подтверждения срок обновится, а ссылка останется прежней."
         )
 
 
@@ -1203,7 +1370,7 @@ async def _notify_admins_renewal_request(
         f"Кто: {who}\n"
         f"Устройство: {_device_label_ru(req.device_kind)} (слот {req.slot_index})\n"
         f"Текущий срок: {_format_expiry_time_ms(req.current_expiry_time_ms)}\n\n"
-        "Напишите пользователю по оплате, затем выберите срок продления.\n"
+        "Свяжитесь с пользователем, затем выберите срок продления.\n"
         "Вся очередь: /pending"
     )
     kb = _renewal_review_keyboard(req.telegram_id, req.device_kind, req.slot_index)
@@ -1448,10 +1615,8 @@ async def cb_device_chosen(query: CallbackQuery, bot: Bot) -> None:
                 pass
             await query.message.answer(
                 "Заявка отправлена.\n\n"
-                "Что дальше:\n"
-                "1. Администратор проверит оплату.\n"
-                "2. После одобрения ссылка на подписку придёт в этот чат.\n"
-                "3. Ничего дополнительно нажимать не нужно."
+                "Ожидайте: администратор свяжется с вами в Telegram. "
+                "После подтверждения ссылка на подписку придёт в этот чат."
             )
         await query.answer()
         return
@@ -1472,11 +1637,12 @@ async def cb_device_chosen(query: CallbackQuery, bot: Bot) -> None:
     if query.message:
         label = _device_subscription_label_from_parts(kind, slot_index)
         await query.message.answer(
-            _subscription_message_text(
-                label,
-                expiry_time_ms,
-                links,
-            )
+            f"✅ <b>Доступ готов</b>\n\n"
+            f"{label}\n"
+            f"Действует до: <b>{_format_expiry_time_ms(expiry_time_ms)}</b>\n\n"
+            "Инструкция и подключение открываются по кнопке ниже.",
+            reply_markup=_link_keyboard(links[0][1], kind, slot_index),
+            parse_mode="HTML",
         )
     await query.answer("Готово")
 
@@ -1521,17 +1687,25 @@ async def cb_approve_access(query: CallbackQuery, bot: Bot) -> None:
     await query.answer("Доступ выдан.")
 
     links = _all_links(sub)
-    user_text = _subscription_message_text(
-        _device_subscription_label_from_parts(
-            pending.device_kind,
-            pending.slot_index,
-        ),
-        expiry_time_ms,
-        links,
+    label = _device_subscription_label_from_parts(
+        pending.device_kind,
+        pending.slot_index,
     )
     delivered = False
     try:
-        await bot.send_message(tid, user_text)
+        await bot.send_message(
+            tid,
+            f"✅ <b>Доступ готов</b>\n\n"
+            f"{label}\n"
+            f"Действует до: <b>{_format_expiry_time_ms(expiry_time_ms)}</b>\n\n"
+            "Инструкция и подключение открываются по кнопке ниже.",
+            reply_markup=_link_keyboard(
+                links[0][1],
+                pending.device_kind,
+                pending.slot_index,
+            ),
+            parse_mode="HTML",
+        )
         delivered = True
     except Exception:
         logger.exception("Не удалось написать пользователю %s", tid)
