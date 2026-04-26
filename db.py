@@ -379,6 +379,28 @@ async def count_devices() -> int:
     return int(row[0]) if row else 0
 
 
+async def count_devices_by_status() -> tuple[int, int, int]:
+    """Возвращает (active, expiring_soon, expired) на основе expiry_time_ms."""
+    import time
+    now_ms = int(time.time() * 1000)
+    three_days_ms = 3 * 24 * 60 * 60 * 1000
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN expiry_time_ms > ? THEN 1 ELSE 0 END),
+                SUM(CASE WHEN expiry_time_ms > ? AND expiry_time_ms <= ? THEN 1 ELSE 0 END),
+                SUM(CASE WHEN expiry_time_ms IS NOT NULL AND expiry_time_ms <= ? THEN 1 ELSE 0 END)
+            FROM user_devices
+            """,
+            (now_ms, now_ms, now_ms + three_days_ms, now_ms),
+        )
+        row = await cur.fetchone()
+    if not row:
+        return 0, 0, 0
+    return int(row[0] or 0), int(row[1] or 0), int(row[2] or 0)
+
+
 async def count_pending_requests() -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT COUNT(*) FROM access_requests")
@@ -455,6 +477,62 @@ async def delete_access_request(telegram_id: int) -> None:
             (telegram_id,),
         )
         await db.commit()
+
+
+async def list_all_access_requests() -> list[AccessRequestRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT telegram_id, username, first_name, last_name, base_email,
+                   device_kind, slot_index
+            FROM access_requests
+            ORDER BY rowid ASC
+            """
+        )
+        rows = await cur.fetchall()
+    return [
+        AccessRequestRecord(
+            telegram_id=r["telegram_id"],
+            username=r["username"],
+            first_name=r["first_name"],
+            last_name=r["last_name"],
+            base_email=r["base_email"],
+            device_kind=r["device_kind"] or "other",
+            slot_index=int(r["slot_index"] or 1),
+        )
+        for r in rows
+    ]
+
+
+async def list_all_renewal_requests() -> list[RenewalRequestRecord]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT r.telegram_id, r.username, r.first_name, r.last_name,
+                   r.device_kind, r.slot_index, d.expiry_time_ms
+            FROM renewal_requests r
+            LEFT JOIN user_devices d
+              ON d.telegram_id = r.telegram_id
+             AND d.device_kind = r.device_kind
+             AND d.slot_index = r.slot_index
+            ORDER BY r.rowid ASC
+            """
+        )
+        rows = await cur.fetchall()
+    return [
+        RenewalRequestRecord(
+            telegram_id=r["telegram_id"],
+            username=r["username"],
+            first_name=r["first_name"],
+            last_name=r["last_name"],
+            device_kind=r["device_kind"],
+            slot_index=r["slot_index"],
+            current_expiry_time_ms=r["expiry_time_ms"],
+        )
+        for r in rows
+    ]
 
 
 async def has_accepted_usage_rules(telegram_id: int) -> bool:
