@@ -181,20 +181,34 @@ class PanelAPI:
         await self._fetch_panel_csrf_token()
 
     async def get_sub_config(self) -> dict[str, Any]:
-        """Читает настройки подписки из панели (POST /panel/api/setting/all).
+        """Читает настройки подписки из панели.
+
+        Новые 3x-ui (Vue 3): POST /panel/setting/all.
+        Старые: POST /panel/api/setting/all.
 
         Возвращает словарь с полями subURI, subPath, subDomain, subPort,
         subKeyFile, subCertFile, subEnable и т.п. Пустой словарь — если не удалось.
         """
         client = self._require_client()
-        try:
-            r = await client.post(
-                self._abs_url("panel/api/setting/all"),
-                headers=self._csrf_headers(),
-            )
-        except httpx.RequestError as e:
-            logger.exception("setting/all: %s", e)
-            raise PanelAPIError("Не удалось получить настройки панели.") from e
+        urls = (
+            self._abs_url("panel/setting/all"),
+            self._abs_url("panel/api/setting/all"),
+        )
+        last_status = 0
+        r: httpx.Response | None = None
+        for url in urls:
+            try:
+                r = await client.post(url, headers=self._csrf_headers())
+            except httpx.RequestError as e:
+                logger.exception("setting/all: %s", e)
+                raise PanelAPIError("Не удалось получить настройки панели.") from e
+            last_status = r.status_code
+            if r.status_code == 404 and url == urls[0]:
+                logger.info("setting/all: 404 на новом пути, пробуем legacy panel/api/...")
+                continue
+            break
+        if r is None:
+            raise PanelAPIError("setting/all: нет ответа.")
         if r.status_code == 403:
             raise PanelAPIError("setting/all: 403 — сессия или CSRF (обновите бота).")
         if r.status_code != 200:
