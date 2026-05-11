@@ -50,6 +50,11 @@ class PanelAPIError(Exception):
 
 
 class PanelAPI:
+    """Клиент 3x-ui. Новые версии (Vue 3 / CSRF): токен с GET /csrf-token, заголовок X-CSRF-Token для POST."""
+
+    # Совпадает с web/session/csrf.go в 3x-ui
+    _CSRF_HEADER = "X-CSRF-Token"
+
     def __init__(
         self,
         base_url: str,
@@ -62,6 +67,62 @@ class PanelAPI:
         self._password = password
         self._timeout = timeout
         self._client: httpx.AsyncClient | None = None
+        self._csrf_token: str | None = None
+
+    def _abs_url(self, path: str) -> str:
+        """Полный URL относительно корня панели (учитывает webBasePath в PANEL_BASE_URL)."""
+        p = path.lstrip("/")
+        return f"{self._base}/{p}"
+
+    def _csrf_headers(self) -> dict[str, str]:
+        if not self._csrf_token:
+            return {}
+        return {self._CSRF_HEADER: self._csrf_token}
+
+    async def _fetch_public_csrf_token(self) -> None:
+        """Публичный GET /csrf-token до логина (нужен для POST /login на новых панелях)."""
+        client = self._require_client()
+        url = self._abs_url("csrf-token")
+        try:
+            r = await client.get(url)
+        except httpx.RequestError as e:
+            logger.debug("csrf-token (public): сеть %s", e)
+            return
+        if r.status_code != 200:
+            logger.debug("csrf-token (public): HTTP %s", r.status_code)
+            return
+        try:
+            body = r.json()
+        except json.JSONDecodeError:
+            return
+        if not body.get("success"):
+            return
+        obj = body.get("obj")
+        if isinstance(obj, str) and obj.strip():
+            self._csrf_token = obj.strip()
+            logger.info("Получен CSRF-токен (публичный endpoint)")
+
+    async def _fetch_panel_csrf_token(self) -> None:
+        """После логина: GET /panel/csrf-token (как SPA) — на случай смены токена в сессии."""
+        client = self._require_client()
+        url = self._abs_url("panel/csrf-token")
+        try:
+            r = await client.get(url)
+        except httpx.RequestError as e:
+            logger.debug("panel/csrf-token: сеть %s", e)
+            return
+        if r.status_code != 200:
+            return
+        try:
+            body = r.json()
+        except json.JSONDecodeError:
+            return
+        if not body.get("success"):
+            return
+        obj = body.get("obj")
+        if isinstance(obj, str) and obj.strip():
+            self._csrf_token = obj.strip()
+            logger.info("Обновлён CSRF-токен (panel/csrf-token)")
 
     async def __aenter__(self) -> PanelAPI:
         self._client = httpx.AsyncClient(
@@ -69,6 +130,7 @@ class PanelAPI:
             timeout=self._timeout,
             follow_redirects=True,
         )
+        self._csrf_token = None
         return self
 
     async def __aexit__(self, *args: Any) -> None:
@@ -83,16 +145,24 @@ class PanelAPI:
 
     async def login(self) -> None:
         client = self._require_client()
+        await self._fetch_public_csrf_token()
+        login_url = self._abs_url("login")
         try:
             r = await client.post(
-                "/login",
+                login_url,
                 data={"username": self._username, "password": self._password},
+                headers=self._csrf_headers(),
             )
         except httpx.RequestError as e:
             logger.exception("Панель недоступна при логине: %s", e)
             raise PanelAPIError("Панель недоступна. Попробуйте позже.") from e
 
         logger.info("POST /login status=%s", r.status_code)
+        if r.status_code == 403:
+            logger.warning("Логин 403 (часто CSRF). Ответ: %s", r.text[:500])
+            raise PanelAPIError(
+                "Доступ к панели отклонён (403). Обновите бота или проверьте версию 3x-ui / CSRF."
+            )
         if r.status_code != 200:
             logger.warning("Ответ логина: %s", r.text[:500])
             raise PanelAPIError("Не удалось войти в панель (проверьте логин/пароль).")
@@ -108,6 +178,8 @@ class PanelAPI:
             logger.error("Логин отклонён: %s", msg)
             raise PanelAPIError("Вход в панель отклонён.")
 
+        await self._fetch_panel_csrf_token()
+
     async def get_sub_config(self) -> dict[str, Any]:
         """Читает настройки подписки из панели (POST /panel/api/setting/all).
 
@@ -116,10 +188,15 @@ class PanelAPI:
         """
         client = self._require_client()
         try:
-            r = await client.post("/panel/api/setting/all")
+            r = await client.post(
+                self._abs_url("panel/api/setting/all"),
+                headers=self._csrf_headers(),
+            )
         except httpx.RequestError as e:
             logger.exception("setting/all: %s", e)
             raise PanelAPIError("Не удалось получить настройки панели.") from e
+        if r.status_code == 403:
+            raise PanelAPIError("setting/all: 403 — сессия или CSRF (обновите бота).")
         if r.status_code != 200:
             raise PanelAPIError(f"setting/all: HTTP {r.status_code}.")
         try:
@@ -146,7 +223,7 @@ class PanelAPI:
         """id inbound → protocol (как в панели: vless, trojan, shadowsocks, …)."""
         client = self._require_client()
         try:
-            r = await client.get("/panel/api/inbounds/list")
+            r = await client.get(self._abs_url("panel/api/inbounds/list"))
         except httpx.RequestError as e:
             logger.exception("inbounds/list: %s", e)
             raise PanelAPIError("Не удалось получить список inbound.") from e
@@ -222,7 +299,11 @@ class PanelAPI:
             "settings": json.dumps(settings_obj, separators=(",", ":")),
         }
         try:
-            r = await client.post("/panel/api/inbounds/addClient", json=payload)
+            r = await client.post(
+                self._abs_url("panel/api/inbounds/addClient"),
+                json=payload,
+                headers=self._csrf_headers(),
+            )
         except httpx.RequestError as e:
             logger.exception("addClient inbound=%s: %s", inbound_id, e)
             raise PanelAPIError("Сеть: не удалось связаться с панелью.") from e
@@ -273,7 +354,9 @@ class PanelAPI:
         }
         try:
             r = await client.post(
-                f"/panel/api/inbounds/updateClient/{client_uuid}", json=payload
+                self._abs_url(f"panel/api/inbounds/updateClient/{client_uuid}"),
+                json=payload,
+                headers=self._csrf_headers(),
             )
         except httpx.RequestError as e:
             logger.exception("updateClient inbound=%s: %s", inbound_id, e)
