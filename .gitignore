@@ -16,3 +16,6 @@ __pycache__/
 .vscode/
 *.log
 .cursor/
+
+# локальные резервные копии (scripts/backup_bot.py)
+backups/

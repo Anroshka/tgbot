@@ -904,40 +904,54 @@ async def admin_user_info(message: Message) -> None:
         lines.append(f"   UUID: <code>{d.uuid}</code>\n")
 
     await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("send"))
+async def admin_send_to_user(message: Message, bot: Bot) -> None:
+    """Админ отправляет пользователю текст от имени бота (прямая связь)."""
     if not _is_admin(message.from_user.id if message.from_user else None):
         return
 
-    # 1. Сбрасываем флаги в БД
-    await db.reset_all_legal_acceptances()
+    raw = (message.text or "").strip()
+    parts = raw.split(maxsplit=2)
+    if len(parts) < 3:
+        await message.answer(
+            "Использование:\n"
+            "<code>/send TELEGRAM_ID текст сообщения</code>\n\n"
+            "Текст может быть многострочным (всё после ID).\n"
+            "Пользователь должен был хотя бы раз написать боту (/start).",
+            parse_mode="HTML",
+        )
+        return
 
-    # 2. Получаем список всех пользователей с устройствами
-    devices = await db.list_all_user_devices()
-    uids = {d.telegram_id for d in devices}
+    try:
+        target_tid = int(parts[1])
+    except ValueError:
+        await message.answer("Некорректный Telegram ID (второй аргумент — целое число).")
+        return
 
-    await message.answer(f"Начинаю рассылку для {len(uids)} пользователей...")
+    body = parts[2].strip()
+    if not body:
+        await message.answer("Текст сообщения пустой.")
+        return
 
-    count = 0
-    for tid in uids:
-        try:
-            # Отправляем вводное сообщение
-            await bot.send_message(
-                tid,
-                "📢 <b>Обновление юридических документов</b>\n\n"
-                "Мы обновили Пользовательское соглашение и Правила использования Сервиса. "
-                "Для дальнейшего использования VPN вам необходимо ознакомиться и принять новые условия.",
-                parse_mode="HTML",
-            )
-            # Отправляем сам текст с кнопкой
-            await bot.send_message(
-                tid, LEGAL_TEXT, reply_markup=_agreement_inline_keyboard()
-            )
-            count += 1
-            # Небольшая пауза, чтобы не спамить API Telegram слишком быстро
-            await asyncio.sleep(0.05)
-        except Exception as e:
-            logger.warning("Не удалось отправить уведомление %s: %s", tid, e)
+    prefix = "💬 Сообщение от администратора:\n\n"
+    try:
+        await bot.send_message(target_tid, prefix + body)
+    except Exception as e:
+        logger.exception("Админ /send: не удалось доставить tg_id=%s", target_tid)
+        await message.answer(
+            f"Не удалось отправить пользователю <code>{target_tid}</code>.\n"
+            f"Частые причины: пользователь не нажимал /start, заблокировал бота, неверный ID.\n"
+            f"Технически: {e!s}"[:3500],
+            parse_mode="HTML",
+        )
+        return
 
-    await message.answer(f"Рассылка завершена. Успешно отправлено: {count}.")
+    await message.answer(
+        f"Сообщение доставлено пользователю <code>{target_tid}</code>.",
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data == "agr:no")
