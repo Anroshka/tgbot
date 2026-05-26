@@ -368,6 +368,16 @@ async def _refresh_sub_config() -> None:
     for panel in PANELS:
         if not panel.base_url or not _panel_has_credentials(panel):
             continue
+        if panel.sub_base_url and panel.sub_path:
+            logger.info(
+                "Панель %s (%s): ссылки подписки из .env "
+                "(SUBSCRIPTION_BASE_URL_%s / SUBSCRIPTION_PATH_%s)",
+                panel.index,
+                panel.name,
+                panel.index,
+                panel.index,
+            )
+            continue
         try:
             async with _panel_api(panel) as api:
                 cfg = await api.get_sub_config()

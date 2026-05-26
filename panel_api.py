@@ -300,9 +300,17 @@ class PanelAPI:
             msg = body.get("msg", str(body))
             raise PanelAPIError(f"{op_name}: {msg}{suffix}")
 
+    async def _auth_for_setting_routes(self) -> None:
+        """POST /panel/setting/* в 3x-ui принимает cookie-сессию, не Bearer."""
+        if self._uses_bearer() and self._username and self._password:
+            if not self._logged_in:
+                await self.login()
+            return
+        await self._ensure_auth()
+
     async def get_sub_config(self) -> dict[str, Any]:
         """Настройки подписки: POST /panel/setting/all (3x-ui 3.x)."""
-        await self._ensure_auth()
+        await self._auth_for_setting_routes()
         r: httpx.Response | None = None
         last_status = 0
         for path in ("panel/setting/all", "panel/api/setting/all"):
