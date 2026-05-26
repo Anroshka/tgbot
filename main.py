@@ -31,10 +31,12 @@ from dotenv import load_dotenv
 
 import db
 from panel_api import (
+    PANEL_API_BUILD,
     PanelAPI,
     PanelAPIError,
     expiry_time_ms_for_days,
     inbound_ids_config,
+    panel_api_mode,
     panel_client_email,
     subscription_days,
     subscription_expiry_time_ms,
@@ -1513,7 +1515,11 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(router)
     reminder_task = asyncio.create_task(_subscription_reminder_worker(bot))
-    logger.info("Бот запущен")
+    logger.info(
+        "Бот запущен (panel_api build=%s, PANEL_API_MODE=%s)",
+        PANEL_API_BUILD,
+        panel_api_mode(),
+    )
     try:
         await dp.start_polling(bot)
     finally:

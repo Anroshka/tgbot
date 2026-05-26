@@ -13,6 +13,9 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# Маркер сборки — ищите в journalctl после рестарта; если строки нет, крутится старый код.
+PANEL_API_BUILD = "v3-clients-2026-05-26"
+
 _DEFAULT_INBOUND_IDS = (1, 2, 3, 4)
 
 
@@ -592,7 +595,16 @@ class PanelAPI:
         if not inbound_ids:
             raise PanelAPIError("На панели нет inbound для выдачи доступа.")
 
-        if await self._uses_clients_api_v3():
+        use_v3 = await self._uses_clients_api_v3()
+        logger.info(
+            "register_user_on_all_inbounds: build=%s mode=%s v3=%s base=%s inbounds=%s",
+            PANEL_API_BUILD,
+            panel_api_mode(),
+            use_v3,
+            self._base,
+            inbound_ids,
+        )
+        if use_v3:
             await self._add_client_v3(
                 base_email,
                 client_uuid,
@@ -603,6 +615,9 @@ class PanelAPI:
             )
             return
 
+        logger.warning(
+            "register_user: legacy addClient (проверьте PANEL_API_MODE и что на сервере актуальный panel_api.py)"
+        )
         for iid in inbound_ids:
             await self._add_client_legacy(
                 iid,

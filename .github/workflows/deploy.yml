@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+  # Кнопка «Run workflow» на вкладке Actions появляется только с этим триггером
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -18,8 +20,17 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
           script: |
+            set -e
             cd /root/Tgbot
             git fetch --all
             git reset --hard origin/main
+            echo "=== deploy commit ==="
+            git log -1 --oneline
+            echo "=== panel_api marker ==="
+            grep -n "PANEL_API_BUILD\|clients/add" panel_api.py | head -5
+            echo "=== systemd unit ==="
+            systemctl cat my_bot.service | grep -E 'WorkingDirectory|ExecStart' || true
             systemctl restart my_bot.service
             systemctl is-active my_bot.service
+            sleep 2
+            journalctl -u my_bot.service -n 5 --no-pager | grep -E 'Бот запущен|panel_api build' || true
