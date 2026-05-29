@@ -14,8 +14,6 @@ import string
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
-
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
@@ -159,19 +157,8 @@ def _api_panels() -> list[PanelConfig]:
     return [master] if master else []
 
 
-# HTML-страница с инструкцией (репозиторий: index.html). Без ?name= на конце.
-# Пример: https://macbookairm4.mooo.com/Oab4HaruLF — бот добавит ?name=<sub_token>.
-# Страницу нужно отдавать nginx’ом с вашего index.html; иначе откроется портал 3x-ui.
-SUBSCRIPTION_PORTAL_BASE = _env("SUBSCRIPTION_PORTAL_BASE").rstrip("/")
-
-# Когда в .env задан SUBSCRIPTION_PORTAL_BASE — в Telegram короче (детали на странице).
-SUBSCRIPTION_TG_INSTRUCTION_PORTAL = (
-    "📋 Откройте ссылку ниже в браузере: на странице инструкция под разные системы "
-    "и кнопки импорта в клиенты."
-)
-
 # Мультиподписка 3x-ui 3.2+ (мастер + ноды в одной ссылке).
-SUBSCRIPTION_TG_INSTRUCTION_MULTISUB = """📋 Как подключиться
+SUBSCRIPTION_TG_INSTRUCTION = """📋 Как подключиться
 
 1. Установите клиент с поддержкой подписок — v2RayTun, Hiddify, v2rayN и т.п.
 
@@ -180,12 +167,6 @@ SUBSCRIPTION_TG_INSTRUCTION_MULTISUB = """📋 Как подключиться
 3. Обновите список узлов — появятся серверы со всех локаций (мастер и подключённые ноды).
 
 4. Выберите узел и включите VPN."""
-
-
-def _subscription_portal_link(sub_token: str) -> str:
-    enc = quote(sub_token, safe="")
-    base = SUBSCRIPTION_PORTAL_BASE
-    return f"{base}&name={enc}" if "?" in base else f"{base}?name={enc}"
 
 
 # Тип устройства → префикс в email панели (до _nick и номера слота).
@@ -288,14 +269,10 @@ def _subscription_message_text(
     )
     lines: list[str] = [header, ""]
     if len(links) == 1:
-        if SUBSCRIPTION_PORTAL_BASE:
-            lines.append(SUBSCRIPTION_TG_INSTRUCTION_PORTAL)
+        if _master_panel() is not None:
+            lines.append(SUBSCRIPTION_TG_INSTRUCTION)
             lines.append("")
-            lines.append("Страница с инструкцией и подпиской:")
-        elif _master_panel() is not None:
-            lines.append(SUBSCRIPTION_TG_INSTRUCTION_MULTISUB)
-            lines.append("")
-            lines.append("Ссылка на мультиподписку (все локации в одном профиле):")
+            lines.append("Ссылка на подписку (все локации в одном профиле):")
         else:
             lines.append("Ссылка на подписку:")
         lines.append(links[0][1])
@@ -407,9 +384,7 @@ def _instruction_link(panel: PanelConfig, sub_token: str) -> str:
 
 
 def _all_links(sub_token: str) -> list[tuple[str, str]]:
-    """Мультиподписка с мастер-панели или HTML-портал из .env."""
-    if SUBSCRIPTION_PORTAL_BASE:
-        return [("Инструкция и подписка", _subscription_portal_link(sub_token))]
+    """Прямая ссылка мультиподписки с мастер-панели 3x-ui."""
     master = _master_panel()
     if master is not None:
         return [(master.name, _instruction_link(master, sub_token))]
@@ -1221,7 +1196,7 @@ async def cb_renewal_request(query: CallbackQuery, bot: Bot) -> None:
     await query.answer("Заявка отправлена", show_alert=True)
     if query.message:
         # Если это было детальное окно подписки, мы можем обновить его
-        if "Ссылка на подписку" in (query.message.text or "") or "Ссылки на подписку" in (query.message.text or "") or "Страница с инструкцией" in (query.message.text or ""):
+        if "Ссылка на подписку" in (query.message.text or "") or "Ссылки на подписку" in (query.message.text or ""):
             text = _subscription_message_text(
                 _device_subscription_label_from_parts(device_kind, slot_index),
                 device.expiry_time_ms,
@@ -1705,12 +1680,7 @@ async def main() -> None:
             master.index if master else "?",
             ", ".join(f"#{p.index} {p.name}" for p in ignored),
         )
-    if SUBSCRIPTION_PORTAL_BASE:
-        logger.info(
-            "Ссылки на подписку: HTML-портал %s?name=<sub_token>",
-            SUBSCRIPTION_PORTAL_BASE,
-        )
-    elif master:
+    if master:
         logger.info(
             "Ссылки на подписку: мультиподписка с мастер-панели #%s (subId из 3x-ui)",
             master.index,

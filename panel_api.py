@@ -100,16 +100,15 @@ def build_subscription_link(
     elif sub_base_url:
         base = sub_base_url.rstrip("/")
     elif sub_path:
-        u = urlparse(panel_base_url)
-        root = f"{u.scheme}://{u.netloc}".rstrip("/") if u.scheme and u.netloc else panel_base_url
-        base = f"{root}/{sub_path.strip('/')}"
+        panel_root = panel_base_url.rstrip("/")
+        base = f"{panel_root}/{sub_path.strip('/')}"
     else:
         sub_uri = (cfg.get("subURI") or "").strip()
         if sub_uri:
             base = sub_uri.rstrip("/")
-        else:
+        elif (cfg.get("subDomain") or "").strip() or cfg.get("subPort"):
             u = urlparse(panel_base_url)
-            sub_path_cfg = (cfg.get("subPath") if cfg else None) or "/sub/"
+            sub_path_cfg = (cfg.get("subPath") if cfg else None) or "sub"
             sub_path_cfg = "/" + str(sub_path_cfg).strip("/")
             sub_domain = (cfg.get("subDomain") if cfg else None) or ""
             sub_port = cfg.get("subPort") if cfg else None
@@ -129,6 +128,11 @@ def build_subscription_link(
             if port_int and port_int not in (80, 443):
                 netloc = f"{host}:{port_int}"
             base = f"{scheme}://{netloc}{sub_path_cfg}".rstrip("/")
+        else:
+            panel_root = panel_base_url.rstrip("/")
+            sub_path_cfg = (cfg.get("subPath") if cfg else None) or "sub"
+            sub_path_part = str(sub_path_cfg).strip("/")
+            base = f"{panel_root}/{sub_path_part}" if sub_path_part else panel_root
 
     q = (sub_query_param or "name").lower()
     if q in ("bare", "legacy", "none"):
