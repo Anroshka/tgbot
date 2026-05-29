@@ -87,9 +87,13 @@ def build_subscription_link(
     sub_config: dict[str, Any] | None = None,
     sub_base_url: str = "",
     sub_path: str = "",
-    sub_query_param: str = "name",
+    sub_query_param: str = "path",
 ) -> str:
-    """Ссылка мультиподписки 3x-ui (мастер + ноды) по subId клиента."""
+    """Ссылка мультиподписки 3x-ui (мастер + ноды) по subId клиента.
+
+    Формат по умолчанию: {PANEL_BASE_URL}/{subId}
+    (префикс панели + id подписки, без /sub/ и ?name=).
+    """
     cfg = sub_config if isinstance(sub_config, dict) else {}
     enc = quote(sub_id, safe="")
 
@@ -130,11 +134,15 @@ def build_subscription_link(
             base = f"{scheme}://{netloc}{sub_path_cfg}".rstrip("/")
         else:
             panel_root = panel_base_url.rstrip("/")
-            sub_path_cfg = (cfg.get("subPath") if cfg else None) or "sub"
-            sub_path_part = str(sub_path_cfg).strip("/")
-            base = f"{panel_root}/{sub_path_part}" if sub_path_part else panel_root
+            cfg_sub_path = cfg.get("subPath") if cfg else None
+            if cfg_sub_path is not None and str(cfg_sub_path).strip():
+                sub_path_part = str(cfg_sub_path).strip("/")
+                base = f"{panel_root}/{sub_path_part}"
+            else:
+                # 3x-ui: https://host/{panelPath}/{subId}
+                base = panel_root
 
-    q = (sub_query_param or "name").lower()
+    q = (sub_query_param or "path").lower()
     if q in ("bare", "legacy", "none"):
         return f"{base}?{enc}"
     if q in ("path", "slash"):

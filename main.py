@@ -104,7 +104,11 @@ def _load_panels() -> list[PanelConfig]:
         name = _env(f"PANEL_NAME_{i}") or f"Сервер {i}"
         sub_base = _env(f"SUBSCRIPTION_BASE_URL_{i}").rstrip("/")
         sub_path = _env(f"SUBSCRIPTION_PATH_{i}")
-        sub_qp = _env(f"SUBSCRIPTION_QUERY_PARAM_{i}") or "name"
+        sub_qp = (
+            _env(f"SUBSCRIPTION_QUERY_PARAM_{i}")
+            or _env("SUBSCRIPTION_QUERY_PARAM")
+            or "path"
+        )
         panels.append(
             PanelConfig(
                 index=i,
@@ -135,7 +139,7 @@ def _load_panels() -> list[PanelConfig]:
             api_token=_env("PANEL_API_TOKEN"),
             sub_base_url=_env("SUBSCRIPTION_BASE_URL").rstrip("/"),
             sub_path=_env("SUBSCRIPTION_PATH"),
-            sub_query_param=_env("SUBSCRIPTION_QUERY_PARAM") or "name",
+            sub_query_param=_env("SUBSCRIPTION_QUERY_PARAM") or "path",
         )
     ]
 
