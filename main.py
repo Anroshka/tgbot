@@ -352,14 +352,14 @@ async def _refresh_sub_config() -> None:
     for panel in _api_panels():
         if not panel.base_url or not _panel_has_credentials(panel):
             continue
-        if panel.sub_base_url and panel.sub_path:
+        if panel.sub_base_url:
             logger.info(
                 "Панель %s (%s): ссылки подписки из .env "
-                "(SUBSCRIPTION_BASE_URL_%s / SUBSCRIPTION_PATH_%s)",
+                "(SUBSCRIPTION_BASE_URL_%s → %s/{subId})",
                 panel.index,
                 panel.name,
                 panel.index,
-                panel.index,
+                panel.sub_base_url.rstrip("/"),
             )
             continue
         try:
@@ -1685,10 +1685,20 @@ async def main() -> None:
             ", ".join(f"#{p.index} {p.name}" for p in ignored),
         )
     if master:
-        logger.info(
-            "Ссылки на подписку: мультиподписка с мастер-панели #%s (subId из 3x-ui)",
-            master.index,
-        )
+        if master.sub_base_url:
+            logger.info(
+                "Панель API: %s | Ссылки подписки: %s/{subId}",
+                master.base_url,
+                master.sub_base_url.rstrip("/"),
+            )
+        else:
+            logger.info(
+                "Ссылки на подписку: %s/{subId} (из PANEL_BASE_URL_%s; "
+                "задайте SUBSCRIPTION_BASE_URL_%s, если URI подписки другой)",
+                master.base_url.rstrip("/"),
+                master.index,
+                master.index,
+            )
 
     await db.init_db()
     await _refresh_sub_config()
