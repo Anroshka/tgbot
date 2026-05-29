@@ -2,24 +2,14 @@
 
 from __future__ import annotations
 
-import html
-
 
 SUBSCRIPTION_HOWTO = """📲 <b>Как подключиться</b>
 
-<b>✅ Happ (проще всего)</b>
-1️⃣ Установите <b>Happ</b> из App Store или Google Play
-2️⃣ Нажмите синюю ссылку <b>«Открыть в Happ»</b> ниже
-3️⃣ Включите VPN в Happ — готово ✨
+1️⃣ Нажмите <b>«Скопировать ссылку»</b> ниже
+2️⃣ Откройте клиент (Happ, v2rayNG, Streisand, Hiddify и т.д.)
+3️⃣ «Добавить подписку» / Import → вставьте ссылку → включите VPN ✨"""
 
-<b>📋 Другой клиент</b>
-Кнопка <b>«Скопировать ссылку»</b> → в приложении (v2rayNG, Streisand, Hiddify…) Import → вставьте."""
-
-SUBSCRIPTION_HOWTO_MULTI = """📲 <b>Как подключиться</b>
-
-<b>✅ Happ</b> — установите из магазина, нажмите синюю ссылку у нужной локации.
-
-<b>📋 Другой клиент</b> — кнопка <b>«Скопировать ссылку»</b> для каждой локации."""
+SUBSCRIPTION_LINK_LABEL = "🔗 <b>Ваша ссылка:</b>"
 
 
 def welcome(name: str, *, approval: bool) -> str:
@@ -52,26 +42,6 @@ def device_selection(*, approval: bool) -> str:
 
 def subscription_header(device_label: str, expiry: str) -> str:
     return f"🛡 <b>{device_label}</b>\n📅 Активна до: <b>{expiry}</b>"
-
-
-def happ_link_html(happ_url: str, *, server_name: str = "") -> str:
-    """Кликабельная синяя ссылка в HTML-сообщении Telegram."""
-    href = html.escape(happ_url, quote=True)
-    link = f'<a href="{href}">Открыть в Happ</a>'
-    if server_name:
-        name = html.escape(server_name)
-        return f"📲 {link} — {name}"
-    return f"📲 {link}"
-
-
-def subscription_link_intro(*, multiserver: bool) -> str:
-    if multiserver:
-        return "🔗 <b>Ссылка подписки</b> (для ручного импорта):"
-    return "🔗 <b>Ссылка подписки</b> (для ручного импорта):"
-
-
-def subscription_links_multi_header() -> str:
-    return "🔗 <b>Ссылки подписки</b> по локациям:"
 
 
 # --- Кнопки ---

@@ -32,7 +32,6 @@ from dotenv import load_dotenv
 
 import bot_ui as ui
 import db
-from happ_deeplink import build_happ_deeplink, happ_deeplink_enabled
 from panel_api import (
     PANEL_API_BUILD,
     PanelAPI,
@@ -252,27 +251,6 @@ def _device_subscription_label_from_parts(device_kind: str, slot_index: int) -> 
     return label
 
 
-def _happ_link_lines(
-    device_label: str,
-    links: list[tuple[str, str]],
-) -> list[str]:
-    if not happ_deeplink_enabled():
-        return []
-    out: list[str] = []
-    if len(links) == 1:
-        happ_url = build_happ_deeplink(links[0][1], device_label)
-        if happ_url:
-            out.append(ui.happ_link_html(happ_url))
-        return out
-    for name, link in links:
-        profile = f"{device_label} — {name}" if device_label else name
-        happ_url = build_happ_deeplink(link, profile)
-        if happ_url:
-            out.append("")
-            out.append(ui.happ_link_html(happ_url, server_name=name))
-    return out
-
-
 def _subscription_message_text(
     device_label: str,
     expiry_time_ms: int | None,
@@ -285,29 +263,11 @@ def _subscription_message_text(
         _format_expiry_time_ms(expiry_time_ms),
     )
     lines: list[str] = [header, ""]
-    if len(links) == 1:
+    if links:
         lines.append(ui.SUBSCRIPTION_HOWTO)
         lines.append("")
-        happ_lines = _happ_link_lines(device_label, links)
-        if happ_lines:
-            lines.extend(happ_lines)
-            lines.append("")
-        lines.append(
-            ui.subscription_link_intro(multiserver=_master_panel() is not None)
-        )
+        lines.append(ui.SUBSCRIPTION_LINK_LABEL)
         lines.append(links[0][1])
-    else:
-        lines.append(ui.SUBSCRIPTION_HOWTO_MULTI)
-        lines.append("")
-        happ_lines = _happ_link_lines(device_label, links)
-        if happ_lines:
-            lines.extend(happ_lines)
-            lines.append("")
-        lines.append(ui.subscription_links_multi_header())
-        for name, link in links:
-            lines.append("")
-            lines.append(f"🌍 <b>{name}</b>")
-            lines.append(link)
     if renewal_note:
         lines.append("")
         lines.append(renewal_note)
@@ -320,31 +280,30 @@ _CALLBACK_DATA_MAX = 64
 
 
 def _inline_copy_button(
-    label: str,
     url: str,
     *,
     device_kind: str | None = None,
     slot_index: int | None = None,
-    link_index: int = 0,
 ) -> InlineKeyboardButton | None:
     url = url.strip()
     if not url:
         return None
     if len(url) <= _COPY_TEXT_MAX:
         return InlineKeyboardButton(
-            text=label,
+            text=ui.BTN_COPY_LINK,
             copy_text=CopyTextButton(text=url),
         )
     if device_kind is not None and slot_index is not None:
-        cb = f"cp:{device_kind}:{slot_index}:{link_index}"
+        cb = f"cp:{device_kind}:{slot_index}"
         if len(cb.encode()) <= _CALLBACK_DATA_MAX:
-            return InlineKeyboardButton(text=label, callback_data=cb)
+            return InlineKeyboardButton(text=ui.BTN_COPY_LINK, callback_data=cb)
     return None
 
 
 def _subscription_reply_keyboard(
     *,
     sub_token: str | None = None,
+    device_label: str = "",
     device_kind: str | None = None,
     slot_index: int | None = None,
     show_renew: bool = False,
@@ -356,26 +315,14 @@ def _subscription_reply_keyboard(
 
     if sub_token:
         links = _all_links(sub_token)
-        if len(links) == 1:
+        if links:
             copy_btn = _inline_copy_button(
-                ui.BTN_COPY_LINK,
                 links[0][1],
                 device_kind=device_kind,
                 slot_index=slot_index,
             )
             if copy_btn:
                 rows.append([copy_btn])
-        elif len(links) > 1:
-            for i, (name, link) in enumerate(links):
-                copy_btn = _inline_copy_button(
-                    f"📋 {name}",
-                    link,
-                    device_kind=device_kind,
-                    slot_index=slot_index,
-                    link_index=i,
-                )
-                if copy_btn:
-                    rows.append([copy_btn])
 
     if show_renew and device_kind is not None and slot_index is not None:
         rows.append(
@@ -738,6 +685,7 @@ async def _send_subscription_reminder(bot: Bot, device: db.UserDeviceRecord, sta
         text = ui.REMINDER_EXPIRED.format(label=label, expiry=expiry, note=note)
     kb = _subscription_reply_keyboard(
         sub_token=device.sub_token,
+        device_label=label,
         device_kind=device.device_kind,
         slot_index=device.slot_index,
         show_renew=True,
@@ -1203,6 +1151,7 @@ async def cb_sub_view(query: CallbackQuery) -> None:
     label = _device_subscription_label_from_parts(device_kind, slot_index)
     kb = _subscription_reply_keyboard(
         sub_token=device.sub_token,
+        device_label=label,
         device_kind=device_kind,
         slot_index=slot_index,
         show_renew=not req,
@@ -1219,21 +1168,18 @@ async def cb_sub_view(query: CallbackQuery) -> None:
     await query.answer()
 
 
-async def _device_link_at(
+async def _device_subscription_url(
     tid: int,
     device_kind: str,
     slot_index: int,
-    link_index: int = 0,
-) -> tuple[Any, str, str] | None:
+) -> str | None:
     device = await db.get_user_device(tid, device_kind, slot_index)
     if device is None:
         return None
     links = _all_links(device.sub_token)
-    if not links or link_index < 0 or link_index >= len(links):
+    if not links:
         return None
-    name, url = links[link_index]
-    label = _device_subscription_label_from_parts(device_kind, slot_index)
-    return device, url, label if link_index == 0 else name
+    return links[0][1]
 
 
 @router.callback_query(F.data.startswith("cp:"))
@@ -1243,23 +1189,21 @@ async def cb_copy_link_fallback(query: CallbackQuery, bot: Bot) -> None:
         await query.answer()
         return
     parts = query.data.split(":")
-    if len(parts) != 4:
+    if len(parts) != 3:
         await query.answer(ui.ERR_BAD_DATA, show_alert=True)
         return
-    _, device_kind, slot_raw, link_raw = parts
+    _, device_kind, slot_raw = parts
     try:
         slot_index = int(slot_raw)
-        link_index = int(link_raw)
     except ValueError:
         await query.answer(ui.ERR_BAD_DATA, show_alert=True)
         return
 
     tid = query.from_user.id
-    resolved = await _device_link_at(tid, device_kind, slot_index, link_index)
-    if resolved is None:
+    sub_url = await _device_subscription_url(tid, device_kind, slot_index)
+    if not sub_url:
         await query.answer(ui.ERR_SUB_NOT_FOUND, show_alert=True)
         return
-    _device, sub_url, _label = resolved
     await query.answer(ui.COPY_LINK_SENT, show_alert=False)
     try:
         await bot.send_message(
@@ -1323,6 +1267,7 @@ async def cb_renewal_request(query: CallbackQuery, bot: Bot) -> None:
             )
             kb = _subscription_reply_keyboard(
                 sub_token=device.sub_token,
+                device_label=label,
                 device_kind=device_kind,
                 slot_index=slot_index,
                 back_subs=True,
@@ -1480,6 +1425,7 @@ async def cb_renewal_approve(query: CallbackQuery, bot: Bot) -> None:
             ),
             reply_markup=_subscription_reply_keyboard(
                 sub_token=device.sub_token if device else None,
+                device_label=label,
                 device_kind=device_kind,
                 slot_index=slot_index,
                 back_subs=True,
@@ -1622,6 +1568,7 @@ async def cb_device_chosen(query: CallbackQuery, bot: Bot) -> None:
                 text,
                 reply_markup=_subscription_reply_keyboard(
                     sub_token=sub,
+                    device_label=label,
                     device_kind=kind,
                     slot_index=slot_index,
                     back_subs=True,
@@ -1688,6 +1635,7 @@ async def cb_approve_access(query: CallbackQuery, bot: Bot) -> None:
             user_text,
             reply_markup=_subscription_reply_keyboard(
                 sub_token=sub,
+                device_label=label,
                 device_kind=pending.device_kind,
                 slot_index=pending.slot_index,
                 back_subs=True,
