@@ -19,18 +19,6 @@ PANEL_API_BUILD = "v3-only-2026-05-29"
 _DEFAULT_INBOUND_IDS = (1, 2, 3, 4)
 
 
-def vless_flow_inbound_id() -> int:
-    try:
-        return int(os.getenv("VLESS_FLOW_INBOUND_ID", "1"))
-    except ValueError:
-        return 1
-
-
-def vless_flow_value() -> str:
-    v = os.getenv("VLESS_FLOW_VISION", "xtls-rprx-vision").strip()
-    return v or "xtls-rprx-vision"
-
-
 def subscription_days() -> int:
     try:
         v = int(os.getenv("SUBSCRIPTION_DAYS", "30"))
@@ -555,15 +543,7 @@ class PanelAPI:
             row["password"] = client_uuid
         if "trojan" not in protos or len(protos) > 1:
             row["id"] = client_uuid
-        # В v3 один клиент на все inbound: flow на записи попадает и в trojan,
-        # а Xray отказывается стартовать (Flow for Trojan has been removed).
-        flow_iid = vless_flow_inbound_id()
-        if (
-            "trojan" not in protos
-            and flow_iid in inbound_ids
-            and (proto_map.get(flow_iid) or "").lower() == "vless"
-        ):
-            row["flow"] = vless_flow_value()
+        # flow для новых клиентов не задаём (только сохраняем из existing при продлении).
         return row
 
     async def _add_client(

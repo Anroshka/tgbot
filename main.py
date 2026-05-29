@@ -28,6 +28,7 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 
+import bot_ui as ui
 import db
 from panel_api import (
     PANEL_API_BUILD,
@@ -161,18 +162,6 @@ def _api_panels() -> list[PanelConfig]:
     return [master] if master else []
 
 
-# Мультиподписка 3x-ui 3.2+ (мастер + ноды в одной ссылке).
-SUBSCRIPTION_TG_INSTRUCTION = """📋 Как подключиться
-
-1. Установите клиент с поддержкой подписок — v2RayTun, Hiddify, v2rayN и т.п.
-
-2. Добавьте подписку по ссылке из сообщения ниже («Подписка по URL» / Import from URL).
-
-3. Обновите список узлов — появятся серверы со всех локаций (мастер и подключённые ноды).
-
-4. Выберите узел и включите VPN."""
-
-
 # Тип устройства → префикс в email панели (до _nick и номера слота).
 EMAIL_PREFIX = {
     "phone": "phone",
@@ -267,24 +256,23 @@ def _subscription_message_text(
     renewal_note: str = "",
 ) -> str:
     """links: список (название_сервера, ссылка). Если панель одна — заголовок сервера не печатается."""
-    header = (
-        f"{device_label}\n"
-        f"Подписка действует до: {_format_expiry_time_ms(expiry_time_ms)}"
+    header = ui.subscription_header(
+        device_label,
+        _format_expiry_time_ms(expiry_time_ms),
     )
     lines: list[str] = [header, ""]
     if len(links) == 1:
-        if _master_panel() is not None:
-            lines.append(SUBSCRIPTION_TG_INSTRUCTION)
-            lines.append("")
-            lines.append("Ссылка на подписку (все локации в одном профиле):")
-        else:
-            lines.append("Ссылка на подписку:")
+        lines.append(ui.SUBSCRIPTION_HOWTO)
+        lines.append("")
+        lines.append(
+            ui.subscription_link_intro(multiserver=_master_panel() is not None)
+        )
         lines.append(links[0][1])
     else:
-        lines.append("Ссылки на подписку (добавьте обе в клиент):")
+        lines.append(ui.subscription_links_multi_header())
         for name, link in links:
             lines.append("")
-            lines.append(f"🌍 {name}:")
+            lines.append(f"🌍 <b>{name}</b>")
             lines.append(link)
     if renewal_note:
         lines.append("")
@@ -298,7 +286,7 @@ def _renew_device_keyboard(device_kind: str, slot_index: int) -> InlineKeyboardM
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🔁 Продлить",
+                    text=ui.BTN_RENEW,
                     callback_data=f"rnw_req:{device_kind}:{slot_index}",
                 )
             ]
@@ -313,7 +301,7 @@ def _renewal_review_keyboard(tid: int, device_kind: str, slot_index: int) -> Inl
     for days in APPROVAL_DURATION_CHOICES:
         row.append(
             InlineKeyboardButton(
-                text=f"✅ {days} дн.",
+                text=ui.BTN_ADMIN_APPROVE_DAYS.format(days=days),
                 callback_data=f"rnw_apr:{tid}:{device_kind}:{slot_index}:{days}",
             )
         )
@@ -325,7 +313,7 @@ def _renewal_review_keyboard(tid: int, device_kind: str, slot_index: int) -> Inl
     rows.append(
         [
             InlineKeyboardButton(
-                text="❌ Отклонить",
+                text=ui.BTN_ADMIN_REJECT,
                 callback_data=f"rnw_rej:{tid}:{device_kind}:{slot_index}",
             )
         ]
@@ -410,37 +398,17 @@ def _greeting_name(user: User | None) -> str:
 
 
 def _welcome_text(user: User | None) -> str:
-    name = _greeting_name(user)
-    approval_note = (
-        "\n\nЗаявку перед выдачей может подтвердить администратор — ссылка придёт в этот чат."
-        if _require_approval()
-        else ""
-    )
-    return (
-        f"⚡️ Добро пожаловать, {name}, в Vibecode VPN!\n"
-        "Твой личный доступ к свободному интернету — быстрый, стабильный и честный.\n\n"
-        "Наши условия:\n\n"
-        "Цена: всего 80 руб / месяц.\n\n"
-        "Устройства: подключай любое количество гаджетов без доплат.\n\n"
-        "Трафик: комфортный объем для повседневного использования.\n\n"
-        "⚠️ Важное требование:\n\n"
-        "Для корректной работы сервиса обязательна настройка раздельного туннелирования "
-        "(Split Tunneling). Это позволит VPN работать только в нужных приложениях, "
-        "сохраняя высокую скорость для остальных."
-        f"{approval_note}\n\n"
-        "Готов начать?\n"
-        "Нажми кнопку ниже, чтобы получить конфиг и инструкцию по настройке."
-    )
+    return ui.welcome(_greeting_name(user), approval=_require_approval())
 
 
 def _main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="💳 Получить доступ", callback_data="menu_get_access"),
+                InlineKeyboardButton(text=ui.BTN_GET_ACCESS, callback_data="menu_get_access"),
             ],
             [
-                InlineKeyboardButton(text="📱 Мои подписки", callback_data="menu_my_subs"),
+                InlineKeyboardButton(text=ui.BTN_MY_SUBS, callback_data="menu_my_subs"),
             ],
         ]
     )
@@ -457,7 +425,7 @@ def _my_subs_keyboard(devices: list[db.UserDeviceRecord]) -> InlineKeyboardMarku
             )
         ])
     buttons.append([
-        InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu_main")
+        InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")
     ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -474,7 +442,7 @@ def _device_inline_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📟 Другое", callback_data="dev:other"),
             ],
             [
-                InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu_main"),
+                InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main"),
             ],
         ]
     )
@@ -482,16 +450,7 @@ def _device_inline_keyboard() -> InlineKeyboardMarkup:
 
 def _device_selection_text() -> str:
     """Текст перед выбором устройства (оплата + тариф при модели с заявкой админу)."""
-    if _require_approval():
-        return (
-            "💳 <b>Как проходит оплата</b>\n\n"
-            "Выберите тип устройства ниже — заявку получит администратор. "
-            "Он напишет вам здесь, в Telegram, и пришлёт реквизиты для перевода.\n\n"
-            "Стоимость доступа — <b>80 ₽</b> на <b>30 дней</b>. После перевода "
-            "администратор подтвердит оплату и вы получите ссылку на подписку.\n\n"
-            "<b>Шаг 1 — выберите устройство:</b>"
-        )
-    return "Выберите устройство, для которого нужна ссылка:"
+    return ui.device_selection(approval=_require_approval())
 
 
 def _terms_inline_keyboard() -> InlineKeyboardMarkup:
@@ -499,17 +458,17 @@ def _terms_inline_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Подписать",
+                    text=ui.BTN_AGREE,
                     callback_data="terms:yes",
                 ),
                 InlineKeyboardButton(
-                    text="❌ Отказаться",
+                    text=ui.BTN_DECLINE,
                     callback_data="terms:no",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text="⬅️ Назад в меню",
+                    text=ui.BTN_BACK_MENU,
                     callback_data="menu_main",
                 ),
             ],
@@ -522,17 +481,17 @@ def _agreement_inline_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Принимаю всё",
+                    text=ui.BTN_AGREE,
                     callback_data="agr:yes",
                 ),
                 InlineKeyboardButton(
-                    text="❌ Не согласен",
+                    text=ui.BTN_DECLINE,
                     callback_data="agr:no",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text="⬅️ Назад в меню",
+                    text=ui.BTN_BACK_MENU,
                     callback_data="menu_main",
                 ),
             ],
@@ -547,7 +506,7 @@ def _access_review_keyboard(target_telegram_id: int) -> InlineKeyboardMarkup:
     for days in APPROVAL_DURATION_CHOICES:
         row.append(
             InlineKeyboardButton(
-                text=f"✅ {days} дн.",
+                text=ui.BTN_ADMIN_APPROVE_DAYS.format(days=days),
                 callback_data=f"apr:{target_telegram_id}:{days}",
             )
         )
@@ -559,7 +518,7 @@ def _access_review_keyboard(target_telegram_id: int) -> InlineKeyboardMarkup:
     rows.append(
         [
             InlineKeyboardButton(
-                text="❌ Отклонить",
+                text=ui.BTN_ADMIN_REJECT,
                 callback_data=f"rej:{target_telegram_id}",
             )
         ]
@@ -580,14 +539,12 @@ def _format_request_who(req: db.AccessRequestRecord) -> str:
 
 
 async def _notify_admins_new_request(bot: Bot, req: db.AccessRequestRecord) -> None:
-    text = (
-        "📩 Запрос доступа к VPN\n"
-        f"Telegram ID: <code>{req.telegram_id}</code>\n"
-        f"Кто: {_format_request_who(req)}\n"
-        f"Устройство: {_device_label_ru(req.device_kind)}"
-        f" (слот {req.slot_index})\n"
-        f"Префикс email в панели: <code>{req.base_email}</code>\n\n"
-        "Выберите срок подписки или отклоните заявку:"
+    text = ui.ADMIN_NEW_ACCESS.format(
+        tid=req.telegram_id,
+        who=_format_request_who(req),
+        device=_device_label_ru(req.device_kind),
+        slot=req.slot_index,
+        email=req.base_email,
     )
     kb = _access_review_keyboard(req.telegram_id)
     for admin_id in _admin_ids():
@@ -612,7 +569,7 @@ async def _create_subscription_for_user(
     Возвращает (успех, sub_token, expiry_time_ms, текст ошибки для пользователя).
     """
     if not _panels_configured():
-        return False, None, None, "Сейчас выдать ссылку нельзя. Напишите администратору."
+        return False, None, None, ui.ERR_NO_PANEL
     client_uuid = str(uuid.uuid4())
     sub = _sub_token()
     expiry_time_ms = (
@@ -620,7 +577,7 @@ async def _create_subscription_for_user(
     )
     api_panels = _api_panels()
     if not api_panels:
-        return False, None, None, "Сейчас выдать ссылку нельзя. Напишите администратору."
+        return False, None, None, ui.ERR_NO_PANEL
     for panel in api_panels:
         try:
             async with _panel_api(panel) as api:
@@ -648,7 +605,7 @@ async def _create_subscription_for_user(
                 "Неожиданная ошибка при регистрации tg_id=%s на панели %s",
                 tid, panel.index,
             )
-            return False, None, None, "Что-то пошло не так. Попробуйте позже."
+            return False, None, None, ui.ERR_GENERIC
     await db.create_user_device(
         tid,
         device_kind,
@@ -664,25 +621,13 @@ async def _create_subscription_for_user(
 async def _send_subscription_reminder(bot: Bot, device: db.UserDeviceRecord, stage: str) -> bool:
     label = _device_subscription_label_from_parts(device.device_kind, device.slot_index)
     expiry = _format_expiry_time_ms(device.expiry_time_ms)
-    note = "Нажмите «🔁 Продлить», чтобы отправить заявку администратору."
+    note = ui.REMINDER_NOTE
     if stage == "3d":
-        text = (
-            f"Напоминание: подписка {label} закончится через 3 дня.\n"
-            f"Окончание: {expiry}\n\n"
-            f"{note}"
-        )
+        text = ui.REMINDER_3D.format(label=label, expiry=expiry, note=note)
     elif stage == "1d":
-        text = (
-            f"Напоминание: подписка {label} закончится через 1 день.\n"
-            f"Окончание: {expiry}\n\n"
-            f"{note}"
-        )
+        text = ui.REMINDER_1D.format(label=label, expiry=expiry, note=note)
     else:
-        text = (
-            f"Подписка {label} закончилась.\n"
-            f"Окончание: {expiry}\n\n"
-            f"{note}"
-        )
+        text = ui.REMINDER_EXPIRED.format(label=label, expiry=expiry, note=note)
     kb = _renew_device_keyboard(device.device_kind, device.slot_index)
     try:
         await bot.send_message(device.telegram_id, text, reply_markup=kb)
@@ -757,7 +702,7 @@ async def cmd_start(message: Message) -> None:
         await msg.delete()
 
     text = _welcome_text(message.from_user)
-    await message.answer(text, reply_markup=_main_keyboard())
+    await message.answer(text, reply_markup=_main_keyboard(), parse_mode="HTML")
 
 
 @router.message(F.text == "Получить доступ")
@@ -768,25 +713,24 @@ async def get_access_text(message: Message) -> None:
         await msg.delete()
 
     if message.from_user is None:
-        await message.answer("Что-то пошло не так. Попробуйте ещё раз.")
+        await message.answer(ui.ERR_GENERIC)
         return
 
     if not _panels_configured():
         logger.error("Не сконфигурирована ни одна панель (PANEL_BASE_URL_* / PANEL_LOGIN_* / PANEL_PASSWORD_*)")
-        await message.answer(
-            "Сейчас выдать доступ нельзя. Напишите администратору."
-        )
+        await message.answer(ui.ERR_NO_PANEL)
         return
 
     tid = message.from_user.id
     if await db.get_access_request(tid):
         await message.answer(
-            "Мы уже получили вашу заявку. Ожидайте ответа.",
+            ui.ERR_ALREADY_REQUESTED,
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu_main")]
+                    [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
                 ]
-            )
+            ),
+            parse_mode="HTML",
         )
         return
 
@@ -809,7 +753,9 @@ async def cb_menu_main(query: CallbackQuery) -> None:
     if query.message:
         text = _welcome_text(query.from_user)
         with suppress(Exception):
-            await query.message.edit_text(text, reply_markup=_main_keyboard())
+            await query.message.edit_text(
+                text, reply_markup=_main_keyboard(), parse_mode="HTML"
+            )
     await query.answer()
 
 
@@ -821,18 +767,19 @@ async def cb_menu_get_access(query: CallbackQuery) -> None:
 
     tid = query.from_user.id
     if not _panels_configured():
-        await query.answer("Сейчас выдать доступ нельзя. Напишите администратору.", show_alert=True)
+        await query.answer(ui.ERR_NO_PANEL, show_alert=True)
         return
 
     if await db.get_access_request(tid):
         with suppress(Exception):
             await query.message.edit_text(
-                "Мы уже получили вашу заявку. Ожидайте ответа.",
+                ui.ERR_ALREADY_REQUESTED,
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu_main")]
+                        [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
                     ]
-                )
+                ),
+                parse_mode="HTML",
             )
         await query.answer()
         return
@@ -861,7 +808,7 @@ async def cb_terms_accept(query: CallbackQuery) -> None:
         await query.answer()
         return
     await db.set_rules_accepted(query.from_user.id)
-    await query.answer("Правила приняты")
+    await query.answer(ui.RULES_ACCEPTED_TOAST)
     if query.message:
         with suppress(Exception):
             await query.message.edit_text(
@@ -879,14 +826,14 @@ async def cb_terms_decline(query: CallbackQuery) -> None:
     if query.message:
         with suppress(Exception):
             await query.message.edit_text(
-                "Пока вы не примете правила, оформить подписку нельзя. "
-                "Когда будете готовы — вы сможете вернуться к соглашению.",
+                ui.RULES_DECLINED,
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="💳 Получить доступ", callback_data="menu_get_access")],
-                        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu_main")]
+                        [InlineKeyboardButton(text=ui.BTN_GET_ACCESS, callback_data="menu_get_access")],
+                        [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
                     ]
-                )
+                ),
+                parse_mode="HTML",
             )
 
 
@@ -898,7 +845,7 @@ async def cb_agreement_accept(query: CallbackQuery) -> None:
     # Принимаем сразу всё
     await db.set_rules_accepted(query.from_user.id)
     await db.set_agreement_accepted(query.from_user.id)
-    await query.answer("Условия приняты")
+    await query.answer(ui.AGREEMENT_ACCEPTED_TOAST)
     if query.message:
         with suppress(Exception):
             await query.message.edit_text(
@@ -1004,7 +951,7 @@ async def admin_send_to_user(message: Message, bot: Bot) -> None:
         await message.answer("Текст сообщения пустой.")
         return
 
-    prefix = "💬 Сообщение от администратора:\n\n"
+    prefix = ui.ADMIN_MSG_PREFIX
     try:
         await bot.send_message(target_tid, prefix + body)
     except Exception as e:
@@ -1032,14 +979,14 @@ async def cb_agreement_decline(query: CallbackQuery) -> None:
     if query.message:
         with suppress(Exception):
             await query.message.edit_text(
-                "Без принятия условий использование Сервиса невозможно. "
-                "Если передумаете — вы всегда можете принять их позже.",
+                ui.AGREEMENT_DECLINED,
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="💳 Получить доступ", callback_data="menu_get_access")],
-                        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu_main")]
+                        [InlineKeyboardButton(text=ui.BTN_GET_ACCESS, callback_data="menu_get_access")],
+                        [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
                     ]
-                )
+                ),
+                parse_mode="HTML",
             )
 
 
@@ -1056,18 +1003,20 @@ async def my_subscriptions_text(message: Message) -> None:
     devices = await db.list_user_devices(tid)
     if not devices:
         await message.answer(
-            "Пока нет ссылок. Нажмите «Получить доступ», когда будете готовы.",
+            ui.NO_SUBS_YET,
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="💳 Получить доступ", callback_data="menu_get_access")],
-                    [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu_main")]
+                    [InlineKeyboardButton(text=ui.BTN_GET_ACCESS, callback_data="menu_get_access")],
+                    [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
                 ]
-            )
+            ),
+            parse_mode="HTML",
         )
         return
     await message.answer(
-        f"Ваши активные подписки ({len(devices)}):",
+        ui.SUBS_LIST_TITLE.format(count=len(devices)),
         reply_markup=_my_subs_keyboard(devices),
+        parse_mode="HTML",
     )
 
 
@@ -1081,21 +1030,23 @@ async def cb_menu_my_subs(query: CallbackQuery) -> None:
     if not devices:
         with suppress(Exception):
             await query.message.edit_text(
-                "Пока нет ссылок. Нажмите «Получить доступ», когда будете готовы.",
+                ui.NO_SUBS_YET,
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="💳 Получить доступ", callback_data="menu_get_access")],
-                        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu_main")]
+                        [InlineKeyboardButton(text=ui.BTN_GET_ACCESS, callback_data="menu_get_access")],
+                        [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
                     ]
-                )
+                ),
+                parse_mode="HTML",
             )
         await query.answer()
         return
 
     with suppress(Exception):
         await query.message.edit_text(
-            f"Ваши активные подписки ({len(devices)}):",
+            ui.SUBS_LIST_TITLE.format(count=len(devices)),
             reply_markup=_my_subs_keyboard(devices),
+            parse_mode="HTML",
         )
     await query.answer()
 
@@ -1107,25 +1058,25 @@ async def cb_sub_view(query: CallbackQuery) -> None:
         return
     parts = query.data.split(":")
     if len(parts) != 3:
-        await query.answer("Некорректные данные.", show_alert=True)
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
         return
     _, device_kind, slot_raw = parts
     try:
         slot_index = int(slot_raw)
     except ValueError:
-        await query.answer("Некорректные данные.", show_alert=True)
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
         return
 
     tid = query.from_user.id
     device = await db.get_user_device(tid, device_kind, slot_index)
     if device is None:
-        await query.answer("Подписка не найдена.", show_alert=True)
+        await query.answer(ui.ERR_SUB_NOT_FOUND, show_alert=True)
         return
 
     req = await db.get_renewal_request(tid, device_kind, slot_index)
     renewal_note = ""
     if req:
-        renewal_note = "⏳ Заявка на продление отправлена и ожидает одобрения администратора."
+        renewal_note = ui.RENEWAL_PENDING_NOTE
 
     text = _subscription_message_text(
         _device_subscription_label_from_parts(device_kind, slot_index),
@@ -1138,19 +1089,20 @@ async def cb_sub_view(query: CallbackQuery) -> None:
     if not req:
         buttons.append([
             InlineKeyboardButton(
-                text="🔁 Продлить",
+                text=ui.BTN_RENEW,
                 callback_data=f"rnw_req:{device_kind}:{slot_index}",
             )
         ])
     buttons.append([
-        InlineKeyboardButton(text="⬅️ К списку подписок", callback_data="menu_my_subs"),
-        InlineKeyboardButton(text="⬅️ В меню", callback_data="menu_main"),
+        InlineKeyboardButton(text=ui.BTN_BACK_SUBS, callback_data="menu_my_subs"),
+        InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main"),
     ])
 
     with suppress(Exception):
         await query.message.edit_text(
             text,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+            parse_mode="HTML",
         )
     await query.answer()
 
@@ -1163,19 +1115,19 @@ async def cb_renewal_request(query: CallbackQuery, bot: Bot) -> None:
         return
     parts = query.data.split(":")
     if len(parts) != 3:
-        await query.answer("Некорректные данные.", show_alert=True)
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
         return
     _, device_kind, slot_raw = parts
     try:
         slot_index = int(slot_raw)
     except ValueError:
-        await query.answer("Некорректные данные.", show_alert=True)
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
         return
 
     tid = query.from_user.id
     device = await db.get_user_device(tid, device_kind, slot_index)
     if device is None:
-        await query.answer("Подписка не найдена.", show_alert=True)
+        await query.answer(ui.ERR_SUB_NOT_FOUND, show_alert=True)
         return
 
     inserted = await db.try_insert_renewal_request(
@@ -1187,40 +1139,41 @@ async def cb_renewal_request(query: CallbackQuery, bot: Bot) -> None:
         query.from_user.last_name,
     )
     if not inserted:
-        await query.answer(
-            "Заявка на продление уже отправлена. Ожидайте ответа администратора.",
-            show_alert=True,
-        )
+        await query.answer(ui.ERR_RENEW_PENDING, show_alert=True)
         return
 
     req = await db.get_renewal_request(tid, device_kind, slot_index)
     if req is not None:
         await _notify_admins_renewal_request(bot, req)
 
-    await query.answer("Заявка отправлена", show_alert=True)
+    await query.answer(ui.RENEWAL_SENT_ALERT, show_alert=True)
     if query.message:
-        # Если это было детальное окно подписки, мы можем обновить его
-        if "Ссылка на подписку" in (query.message.text or "") or "Ссылки на подписку" in (query.message.text or ""):
+        msg_text = query.message.text or ""
+        if ui.SUBSCRIPTION_MSG_MARKER in msg_text:
             text = _subscription_message_text(
                 _device_subscription_label_from_parts(device_kind, slot_index),
                 device.expiry_time_ms,
                 _all_links(device.sub_token),
-                renewal_note="⏳ Заявка на продление отправлена и ожидает одобрения администратора. Администратор свяжется с вами по оплате.",
+                renewal_note=ui.RENEWAL_SENT_BODY,
             )
             buttons = [
                 [
-                    InlineKeyboardButton(text="⬅️ К списку подписок", callback_data="menu_my_subs"),
-                    InlineKeyboardButton(text="⬅️ В меню", callback_data="menu_main"),
+                    InlineKeyboardButton(text=ui.BTN_BACK_SUBS, callback_data="menu_my_subs"),
+                    InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main"),
                 ]
             ]
             with suppress(Exception):
-                await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+                await query.message.edit_text(
+                    text,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+                    parse_mode="HTML",
+                )
         else:
-            # Для других сообщений (например, автоматических напоминаний) просто дописываем статус
             with suppress(Exception):
                 await query.message.edit_text(
-                    text=f"{query.message.text}\n\n⏳ Заявка на продление отправлена. Администратор свяжется с вами по оплате.",
-                    reply_markup=None
+                    text=f"{msg_text}\n\n{ui.RENEWAL_SENT_BODY}",
+                    reply_markup=None,
+                    parse_mode="HTML",
                 )
 
 
@@ -1234,13 +1187,12 @@ async def _notify_admins_renewal_request(
     if name:
         who_parts.append(name)
     who = " / ".join(who_parts) if who_parts else "без имени"
-    text = (
-        "🔁 Запрос на продление\n"
-        f"Telegram ID: <code>{req.telegram_id}</code>\n"
-        f"Кто: {who}\n"
-        f"Устройство: {_device_label_ru(req.device_kind)} (слот {req.slot_index})\n"
-        f"Текущий срок: {_format_expiry_time_ms(req.current_expiry_time_ms)}\n\n"
-        "Напишите пользователю по оплате, затем выберите срок продления:"
+    text = ui.ADMIN_RENEWAL.format(
+        tid=req.telegram_id,
+        who=who,
+        device=_device_label_ru(req.device_kind),
+        slot=req.slot_index,
+        expiry=_format_expiry_time_ms(req.current_expiry_time_ms),
     )
     kb = _renewal_review_keyboard(req.telegram_id, req.device_kind, req.slot_index)
     for admin_id in _admin_ids():
@@ -1355,17 +1307,16 @@ async def cb_renewal_approve(query: CallbackQuery, bot: Bot) -> None:
     try:
         await bot.send_message(
             tid,
-            (
-                f"✅ Подписка продлена\n"
-                f"{label}\n"
-                f"Новый срок: {_format_expiry_time_ms(new_expiry_ms)}\n\n"
-                "Ссылка на подписку остаётся прежней — ничего перенастраивать не нужно."
+            ui.RENEWAL_APPROVED.format(
+                label=label,
+                expiry=_format_expiry_time_ms(new_expiry_ms),
             ),
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="📱 Мои подписки", callback_data="menu_my_subs")]
+                    [InlineKeyboardButton(text=ui.BTN_MY_SUBS, callback_data="menu_my_subs")]
                 ]
-            )
+            ),
+            parse_mode="HTML",
         )
     except Exception:
         logger.exception("Не удалось уведомить пользователя %s о продлении", tid)
@@ -1410,11 +1361,7 @@ async def cb_renewal_reject(query: CallbackQuery, bot: Bot) -> None:
 
     label = _device_subscription_label_from_parts(device_kind, slot_index)
     try:
-        await bot.send_message(
-            tid,
-            f"Запрос на продление ({label}) отклонён. "
-            "Если считаете это ошибкой — напишите администратору.",
-        )
+        await bot.send_message(tid, ui.RENEWAL_REJECTED, parse_mode="HTML")
     except Exception:
         logger.exception("Не удалось уведомить пользователя %s об отказе в продлении", tid)
 
@@ -1429,32 +1376,26 @@ async def cb_renewal_reject(query: CallbackQuery, bot: Bot) -> None:
 
 
 @router.callback_query(F.data.startswith("dev:"))
-@router.callback_query(F.data.startswith("dev:"))
 async def cb_device_chosen(query: CallbackQuery, bot: Bot) -> None:
     if query.from_user is None:
         await query.answer()
         return
     kind = query.data.split(":", 1)[1]
     if kind not in EMAIL_PREFIX:
-        await query.answer("Выберите вариант из списка.", show_alert=True)
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
         return
 
     tid = query.from_user.id
     if not await db.has_accepted_user_agreement(tid):
-        await query.answer(
-            "Сначала пройдите шаги в «Получить доступ»: правила и соглашение.",
-            show_alert=True,
-        )
+        await query.answer(ui.ERR_NEED_AGREEMENT, show_alert=True)
         return
 
     if await db.get_access_request(tid):
-        await query.answer(
-            "Дождитесь ответа по предыдущей заявке.", show_alert=True
-        )
+        await query.answer(ui.ERR_WAIT_PREVIOUS, show_alert=True)
         return
 
     if not _panels_configured():
-        await query.answer("Сервис временно недоступен.", show_alert=True)
+        await query.answer(ui.ERR_SERVICE_DOWN, show_alert=True)
         return
 
     nick = _sanitize_nick(query.from_user)
@@ -1473,10 +1414,7 @@ async def cb_device_chosen(query: CallbackQuery, bot: Bot) -> None:
             slot_index,
         )
         if not inserted:
-            await query.answer(
-                "Заявка уже отправлена. Ожидайте.",
-                show_alert=True,
-            )
+            await query.answer(ui.ERR_REQUEST_ALREADY, show_alert=True)
             return
         req = await db.get_access_request(tid)
         if req:
@@ -1484,12 +1422,13 @@ async def cb_device_chosen(query: CallbackQuery, bot: Bot) -> None:
         if query.message:
             with suppress(Exception):
                 await query.message.edit_text(
-                    "Заявка отправлена. Когда её одобрят, ссылка на подписку придёт в этот чат.",
+                    ui.ERR_REQUEST_SENT,
                     reply_markup=InlineKeyboardMarkup(
                         inline_keyboard=[
-                            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu_main")]
+                            [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
                         ]
-                    )
+                    ),
+                    parse_mode="HTML",
                 )
         await query.answer()
         return
@@ -1514,12 +1453,13 @@ async def cb_device_chosen(query: CallbackQuery, bot: Bot) -> None:
                 text,
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="📱 Мои подписки", callback_data="menu_my_subs")],
-                        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="menu_main")]
+                        [InlineKeyboardButton(text=ui.BTN_MY_SUBS, callback_data="menu_my_subs")],
+                        [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
                     ]
-                )
+                ),
+                parse_mode="HTML",
             )
-    await query.answer("Готово")
+    await query.answer(ui.DONE)
 
 
 @router.callback_query(F.data.startswith("apr:"))
@@ -1577,9 +1517,10 @@ async def cb_approve_access(query: CallbackQuery, bot: Bot) -> None:
             user_text,
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="📱 Мои подписки", callback_data="menu_my_subs")]
+                    [InlineKeyboardButton(text=ui.BTN_MY_SUBS, callback_data="menu_my_subs")]
                 ]
-            )
+            ),
+            parse_mode="HTML",
         )
         delivered = True
     except Exception:
@@ -1620,10 +1561,7 @@ async def cb_reject_access(query: CallbackQuery, bot: Bot) -> None:
     await query.answer("Отклонено.")
 
     try:
-        await bot.send_message(
-            tid,
-            "Запрос не одобрен. Если вы считаете, что это ошибка — напишите администратору.",
-        )
+        await bot.send_message(tid, ui.ACCESS_REJECTED, parse_mode="HTML")
     except Exception:
         logger.exception("Не удалось уведомить пользователя %s об отказе", tid)
 
@@ -1647,10 +1585,12 @@ async def cmd_stats(message: Message) -> None:
     p = await db.count_pending_requests()
     r = await db.count_pending_renewals()
     await message.answer(
-        f"Уникальных пользователей: {u}\n"
-        f"Всего конфигов (устройств): {d}\n"
-        f"Заявок на доступ: {p}\n"
-        f"Заявок на продление: {r}"
+        f"📊 <b>Статистика</b>\n\n"
+        f"👥 Пользователей: <b>{u}</b>\n"
+        f"📱 Устройств: <b>{d}</b>\n"
+        f"🆕 Заявок на доступ: <b>{p}</b>\n"
+        f"🔁 На продление: <b>{r}</b>",
+        parse_mode="HTML",
     )
 
 
