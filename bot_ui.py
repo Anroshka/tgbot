@@ -3,12 +3,24 @@
 from __future__ import annotations
 
 
-SUBSCRIPTION_HOWTO = """🚀 <b>Как подключиться за 2 минуты</b>
+SUBSCRIPTION_HOWTO = """📲 <b>Как подключиться</b>
 
-1️⃣ Скачайте клиент: <b>v2RayTun</b>, <b>Hiddify</b> или <b>v2rayN</b>
-2️⃣ Вставьте ссылку ниже — «Подписка по URL» / Import from URL
-3️⃣ Нажмите «Обновить» — подтянутся все серверы и локации
-4️⃣ Выберите узел и включите VPN ✨"""
+<b>✅ Happ (проще всего)</b>
+1️⃣ Установите <b>Happ</b> из App Store или Google Play
+2️⃣ Нажмите кнопку <b>«Открыть в Happ»</b> ниже — подписка добавится сама
+3️⃣ Включите VPN в Happ — готово ✨
+
+<b>📋 Другой клиент</b>
+Подойдёт любое приложение с подпиской по ссылке (v2rayNG, Streisand, Hiddify и т.д.):
+скопируйте ссылку ниже → в приложении «Добавить подписку» / Import → вставьте ссылку.
+Кнопку Happ в этом случае не используйте."""
+
+SUBSCRIPTION_HOWTO_MULTI = """📲 <b>Как подключиться</b>
+
+<b>✅ Happ</b> — установите из магазина и нажмите <b>«Открыть в Happ»</b> ниже.
+
+<b>📋 Другой клиент</b> — скопируйте ссылку(и) ниже и добавьте подписку вручную в приложении.
+Кнопку Happ не используйте."""
 
 
 def welcome(name: str, *, approval: bool) -> str:
@@ -45,12 +57,12 @@ def subscription_header(device_label: str, expiry: str) -> str:
 
 def subscription_link_intro(*, multiserver: bool) -> str:
     if multiserver:
-        return "🔗 <b>Ваша ссылка</b> (все локации в одном профиле):"
-    return "🔗 <b>Ваша ссылка:</b>"
+        return "🔗 <b>Ссылка для ручного импорта</b> (все локации в одном профиле):"
+    return "🔗 <b>Ссылка для ручного импорта:</b>"
 
 
 def subscription_links_multi_header() -> str:
-    return "🔗 <b>Ссылки на подписку</b> (добавьте обе в клиент):"
+    return "🔗 <b>Ссылки для ручного импорта</b> (скопируйте и добавьте в клиент):"
 
 
 # --- Кнопки ---
@@ -59,6 +71,7 @@ BTN_MY_SUBS = "📱 Мои подписки"
 BTN_BACK_MENU = "◀️ В меню"
 BTN_BACK_SUBS = "◀️ К подпискам"
 BTN_RENEW = "🔁 Продлить"
+BTN_OPEN_HAPP = "📲 Открыть в Happ"
 BTN_AGREE = "✅ Принимаю"
 BTN_DECLINE = "❌ Не сейчас"
 BTN_ADMIN_APPROVE_DAYS = "✅ {days} дн."

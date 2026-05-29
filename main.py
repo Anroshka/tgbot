@@ -30,6 +30,7 @@ from dotenv import load_dotenv
 
 import bot_ui as ui
 import db
+from happ_deeplink import build_happ_open_url
 from panel_api import (
     PANEL_API_BUILD,
     PanelAPI,
@@ -269,6 +270,8 @@ def _subscription_message_text(
         )
         lines.append(links[0][1])
     else:
+        lines.append(ui.SUBSCRIPTION_HOWTO_MULTI)
+        lines.append("")
         lines.append(ui.subscription_links_multi_header())
         for name, link in links:
             lines.append("")
@@ -280,18 +283,51 @@ def _subscription_message_text(
     return "\n".join(lines)
 
 
-def _renew_device_keyboard(device_kind: str, slot_index: int) -> InlineKeyboardMarkup:
-    """Кнопка «🔁 Продлить» под сообщением с конкретной подпиской устройства."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def _subscription_reply_keyboard(
+    *,
+    sub_token: str | None = None,
+    device_label: str = "",
+    device_kind: str | None = None,
+    slot_index: int | None = None,
+    show_renew: bool = False,
+    back_subs: bool = False,
+    back_menu: bool = False,
+) -> InlineKeyboardMarkup | None:
+    """Кнопка Happ (url) + опционально продление и навигация."""
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if sub_token:
+        links = _all_links(sub_token)
+        if links:
+            happ_url = build_happ_open_url(links[0][1], device_label or "Vibecode VPN")
+            if happ_url:
+                rows.append(
+                    [InlineKeyboardButton(text=ui.BTN_OPEN_HAPP, url=happ_url)]
+                )
+
+    if show_renew and device_kind is not None and slot_index is not None:
+        rows.append(
             [
                 InlineKeyboardButton(
                     text=ui.BTN_RENEW,
                     callback_data=f"rnw_req:{device_kind}:{slot_index}",
                 )
             ]
-        ]
-    )
+        )
+
+    nav: list[InlineKeyboardButton] = []
+    if back_subs:
+        nav.append(
+            InlineKeyboardButton(text=ui.BTN_BACK_SUBS, callback_data="menu_my_subs")
+        )
+    if back_menu:
+        nav.append(
+            InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")
+        )
+    if nav:
+        rows.append(nav)
+
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 def _renewal_review_keyboard(tid: int, device_kind: str, slot_index: int) -> InlineKeyboardMarkup:
@@ -628,9 +664,17 @@ async def _send_subscription_reminder(bot: Bot, device: db.UserDeviceRecord, sta
         text = ui.REMINDER_1D.format(label=label, expiry=expiry, note=note)
     else:
         text = ui.REMINDER_EXPIRED.format(label=label, expiry=expiry, note=note)
-    kb = _renew_device_keyboard(device.device_kind, device.slot_index)
+    kb = _subscription_reply_keyboard(
+        sub_token=device.sub_token,
+        device_label=label,
+        device_kind=device.device_kind,
+        slot_index=device.slot_index,
+        show_renew=True,
+    )
     try:
-        await bot.send_message(device.telegram_id, text, reply_markup=kb)
+        await bot.send_message(
+            device.telegram_id, text, reply_markup=kb, parse_mode="HTML"
+        )
     except Exception:
         logger.exception(
             "Не удалось отправить напоминание stage=%s tg_id=%s device=%s/%s",
@@ -1085,23 +1129,21 @@ async def cb_sub_view(query: CallbackQuery) -> None:
         renewal_note=renewal_note,
     )
 
-    buttons = []
-    if not req:
-        buttons.append([
-            InlineKeyboardButton(
-                text=ui.BTN_RENEW,
-                callback_data=f"rnw_req:{device_kind}:{slot_index}",
-            )
-        ])
-    buttons.append([
-        InlineKeyboardButton(text=ui.BTN_BACK_SUBS, callback_data="menu_my_subs"),
-        InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main"),
-    ])
+    label = _device_subscription_label_from_parts(device_kind, slot_index)
+    kb = _subscription_reply_keyboard(
+        sub_token=device.sub_token,
+        device_label=label,
+        device_kind=device_kind,
+        slot_index=slot_index,
+        show_renew=not req,
+        back_subs=True,
+        back_menu=True,
+    )
 
     with suppress(Exception):
         await query.message.edit_text(
             text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+            reply_markup=kb,
             parse_mode="HTML",
         )
     await query.answer()
@@ -1150,22 +1192,23 @@ async def cb_renewal_request(query: CallbackQuery, bot: Bot) -> None:
     if query.message:
         msg_text = query.message.text or ""
         if ui.SUBSCRIPTION_MSG_MARKER in msg_text:
+            label = _device_subscription_label_from_parts(device_kind, slot_index)
             text = _subscription_message_text(
-                _device_subscription_label_from_parts(device_kind, slot_index),
+                label,
                 device.expiry_time_ms,
                 _all_links(device.sub_token),
                 renewal_note=ui.RENEWAL_SENT_BODY,
             )
-            buttons = [
-                [
-                    InlineKeyboardButton(text=ui.BTN_BACK_SUBS, callback_data="menu_my_subs"),
-                    InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main"),
-                ]
-            ]
+            kb = _subscription_reply_keyboard(
+                sub_token=device.sub_token,
+                device_label=label,
+                back_subs=True,
+                back_menu=True,
+            )
             with suppress(Exception):
                 await query.message.edit_text(
                     text,
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+                    reply_markup=kb,
                     parse_mode="HTML",
                 )
         else:
@@ -1304,6 +1347,7 @@ async def cb_renewal_approve(query: CallbackQuery, bot: Bot) -> None:
     await query.answer(f"Продлено на {days} дн.")
 
     label = _device_subscription_label_from_parts(device_kind, slot_index)
+    device = await db.get_user_device(tid, device_kind, slot_index)
     try:
         await bot.send_message(
             tid,
@@ -1311,10 +1355,11 @@ async def cb_renewal_approve(query: CallbackQuery, bot: Bot) -> None:
                 label=label,
                 expiry=_format_expiry_time_ms(new_expiry_ms),
             ),
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text=ui.BTN_MY_SUBS, callback_data="menu_my_subs")]
-                ]
+            reply_markup=_subscription_reply_keyboard(
+                sub_token=device.sub_token if device else None,
+                device_label=label,
+                back_subs=True,
+                back_menu=True,
             ),
             parse_mode="HTML",
         )
@@ -1451,11 +1496,11 @@ async def cb_device_chosen(query: CallbackQuery, bot: Bot) -> None:
         with suppress(Exception):
             await query.message.edit_text(
                 text,
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [InlineKeyboardButton(text=ui.BTN_MY_SUBS, callback_data="menu_my_subs")],
-                        [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
-                    ]
+                reply_markup=_subscription_reply_keyboard(
+                    sub_token=sub,
+                    device_label=label,
+                    back_subs=True,
+                    back_menu=True,
                 ),
                 parse_mode="HTML",
             )
@@ -1502,11 +1547,12 @@ async def cb_approve_access(query: CallbackQuery, bot: Bot) -> None:
     await query.answer("Доступ выдан.")
 
     links = _all_links(sub)
+    label = _device_subscription_label_from_parts(
+        pending.device_kind,
+        pending.slot_index,
+    )
     user_text = _subscription_message_text(
-        _device_subscription_label_from_parts(
-            pending.device_kind,
-            pending.slot_index,
-        ),
+        label,
         expiry_time_ms,
         links,
     )
@@ -1515,10 +1561,11 @@ async def cb_approve_access(query: CallbackQuery, bot: Bot) -> None:
         await bot.send_message(
             tid,
             user_text,
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text=ui.BTN_MY_SUBS, callback_data="menu_my_subs")]
-                ]
+            reply_markup=_subscription_reply_keyboard(
+                sub_token=sub,
+                device_label=label,
+                back_subs=True,
+                back_menu=True,
             ),
             parse_mode="HTML",
         )
