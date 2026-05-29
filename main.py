@@ -18,9 +18,11 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     CallbackQuery,
+    CopyTextButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
+    LinkPreviewOptions,
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
@@ -30,7 +32,12 @@ from dotenv import load_dotenv
 
 import bot_ui as ui
 import db
-from happ_deeplink import build_happ_open_url
+from happ_deeplink import (
+    build_happ_config_url,
+    build_happ_deeplink,
+    build_happ_telegram_url,
+    happ_deeplink_enabled,
+)
 from panel_api import (
     PANEL_API_BUILD,
     PanelAPI,
@@ -283,6 +290,55 @@ def _subscription_message_text(
     return "\n".join(lines)
 
 
+# Telegram: copy_text до 256 символов; callback_data — до 64 байт
+_COPY_TEXT_MAX = 256
+_CALLBACK_DATA_MAX = 64
+
+
+def _inline_copy_button(
+    label: str,
+    url: str,
+    *,
+    device_kind: str | None = None,
+    slot_index: int | None = None,
+    link_index: int = 0,
+) -> InlineKeyboardButton | None:
+    url = url.strip()
+    if not url:
+        return None
+    if len(url) <= _COPY_TEXT_MAX:
+        return InlineKeyboardButton(
+            text=label,
+            copy_text=CopyTextButton(text=url),
+        )
+    if device_kind is not None and slot_index is not None:
+        cb = f"cp:{device_kind}:{slot_index}:{link_index}"
+        if len(cb.encode()) <= _CALLBACK_DATA_MAX:
+            return InlineKeyboardButton(text=label, callback_data=cb)
+    return None
+
+
+def _inline_happ_button(
+    *,
+    subscription_url: str,
+    device_label: str,
+    device_kind: str | None,
+    slot_index: int | None,
+) -> InlineKeyboardButton | None:
+    if not happ_deeplink_enabled():
+        return None
+    https_url = build_happ_telegram_url(
+        subscription_url, device_label or "Vibecode VPN"
+    )
+    if https_url:
+        return InlineKeyboardButton(text=ui.BTN_OPEN_HAPP, url=https_url)
+    if device_kind is not None and slot_index is not None:
+        cb = f"happ:{device_kind}:{slot_index}"
+        if len(cb.encode()) <= _CALLBACK_DATA_MAX:
+            return InlineKeyboardButton(text=ui.BTN_OPEN_HAPP, callback_data=cb)
+    return None
+
+
 def _subscription_reply_keyboard(
     *,
     sub_token: str | None = None,
@@ -293,17 +349,49 @@ def _subscription_reply_keyboard(
     back_subs: bool = False,
     back_menu: bool = False,
 ) -> InlineKeyboardMarkup | None:
-    """Кнопка Happ (url) + опционально продление и навигация."""
+    """Happ (https или callback) + копирование ссылки + навигация."""
     rows: list[list[InlineKeyboardButton]] = []
 
     if sub_token:
         links = _all_links(sub_token)
         if links:
-            happ_url = build_happ_open_url(links[0][1], device_label or "Vibecode VPN")
-            if happ_url:
-                rows.append(
-                    [InlineKeyboardButton(text=ui.BTN_OPEN_HAPP, url=happ_url)]
+            label = device_label or "Vibecode VPN"
+            action_row: list[InlineKeyboardButton] = []
+            happ_btn = _inline_happ_button(
+                subscription_url=links[0][1],
+                device_label=label,
+                device_kind=device_kind,
+                slot_index=slot_index,
+            )
+            if happ_btn:
+                action_row.append(happ_btn)
+            if len(links) == 1:
+                copy_btn = _inline_copy_button(
+                    ui.BTN_COPY_LINK,
+                    links[0][1],
+                    device_kind=device_kind,
+                    slot_index=slot_index,
                 )
+                if copy_btn:
+                    action_row.append(copy_btn)
+            if action_row:
+                rows.append(action_row)
+            if len(links) > 1:
+                for i, (name, link) in enumerate(links):
+                    copy_label = (
+                        ui.BTN_COPY_LINK
+                        if len(links) == 1
+                        else f"📋 {name}"
+                    )
+                    copy_btn = _inline_copy_button(
+                        copy_label,
+                        link,
+                        device_kind=device_kind,
+                        slot_index=slot_index,
+                        link_index=i,
+                    )
+                    if copy_btn:
+                        rows.append([copy_btn])
 
     if show_renew and device_kind is not None and slot_index is not None:
         rows.append(
@@ -1149,6 +1237,106 @@ async def cb_sub_view(query: CallbackQuery) -> None:
     await query.answer()
 
 
+async def _device_link_at(
+    tid: int,
+    device_kind: str,
+    slot_index: int,
+    link_index: int = 0,
+) -> tuple[Any, str, str] | None:
+    device = await db.get_user_device(tid, device_kind, slot_index)
+    if device is None:
+        return None
+    links = _all_links(device.sub_token)
+    if not links or link_index < 0 or link_index >= len(links):
+        return None
+    name, url = links[link_index]
+    label = _device_subscription_label_from_parts(device_kind, slot_index)
+    return device, url, label if link_index == 0 else name
+
+
+@router.callback_query(F.data.startswith("happ:"))
+async def cb_happ_open(query: CallbackQuery, bot: Bot) -> None:
+    if query.from_user is None or not query.data:
+        await query.answer()
+        return
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
+        return
+    _, device_kind, slot_raw = parts
+    try:
+        slot_index = int(slot_raw)
+    except ValueError:
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
+        return
+
+    tid = query.from_user.id
+    resolved = await _device_link_at(tid, device_kind, slot_index)
+    if resolved is None:
+        await query.answer(ui.ERR_SUB_NOT_FOUND, show_alert=True)
+        return
+    _device, sub_url, label = resolved
+    open_url = build_happ_telegram_url(sub_url, label) or build_happ_config_url(
+        sub_url, label
+    )
+    deeplink = build_happ_deeplink(sub_url, label)
+    if not open_url and not deeplink:
+        await query.answer(ui.ERR_GENERIC, show_alert=True)
+        return
+
+    try:
+        await bot.send_message(
+            tid,
+            ui.HAPP_OPEN_HINT,
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+        await bot.send_message(
+            tid,
+            open_url or deeplink,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+        await query.answer()
+    except Exception:
+        logger.exception("Не удалось отправить happ:// пользователю %s", tid)
+        await query.answer(ui.ERR_GENERIC, show_alert=True)
+
+
+@router.callback_query(F.data.startswith("cp:"))
+async def cb_copy_link_fallback(query: CallbackQuery, bot: Bot) -> None:
+    """Если ссылка длиннее 256 символов — copy_text недоступен, шлём в чат."""
+    if query.from_user is None or not query.data:
+        await query.answer()
+        return
+    parts = query.data.split(":")
+    if len(parts) != 4:
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
+        return
+    _, device_kind, slot_raw, link_raw = parts
+    try:
+        slot_index = int(slot_raw)
+        link_index = int(link_raw)
+    except ValueError:
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
+        return
+
+    tid = query.from_user.id
+    resolved = await _device_link_at(tid, device_kind, slot_index, link_index)
+    if resolved is None:
+        await query.answer(ui.ERR_SUB_NOT_FOUND, show_alert=True)
+        return
+    _device, sub_url, _label = resolved
+    await query.answer(ui.COPY_LINK_SENT, show_alert=False)
+    try:
+        await bot.send_message(
+            tid,
+            sub_url,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+    except Exception:
+        logger.exception("Не удалось отправить ссылку пользователю %s", tid)
+
+
 @router.callback_query(F.data.startswith("rnw_req:"))
 async def cb_renewal_request(query: CallbackQuery, bot: Bot) -> None:
     """Пользователь нажал «🔁 Продлить» у конкретной подписки."""
@@ -1202,6 +1390,8 @@ async def cb_renewal_request(query: CallbackQuery, bot: Bot) -> None:
             kb = _subscription_reply_keyboard(
                 sub_token=device.sub_token,
                 device_label=label,
+                device_kind=device_kind,
+                slot_index=slot_index,
                 back_subs=True,
                 back_menu=True,
             )
@@ -1358,6 +1548,8 @@ async def cb_renewal_approve(query: CallbackQuery, bot: Bot) -> None:
             reply_markup=_subscription_reply_keyboard(
                 sub_token=device.sub_token if device else None,
                 device_label=label,
+                device_kind=device_kind,
+                slot_index=slot_index,
                 back_subs=True,
                 back_menu=True,
             ),
@@ -1499,6 +1691,8 @@ async def cb_device_chosen(query: CallbackQuery, bot: Bot) -> None:
                 reply_markup=_subscription_reply_keyboard(
                     sub_token=sub,
                     device_label=label,
+                    device_kind=kind,
+                    slot_index=slot_index,
                     back_subs=True,
                     back_menu=True,
                 ),
@@ -1564,6 +1758,8 @@ async def cb_approve_access(query: CallbackQuery, bot: Bot) -> None:
             reply_markup=_subscription_reply_keyboard(
                 sub_token=sub,
                 device_label=label,
+                device_kind=pending.device_kind,
+                slot_index=pending.slot_index,
                 back_subs=True,
                 back_menu=True,
             ),
