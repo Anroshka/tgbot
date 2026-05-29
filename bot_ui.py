@@ -2,22 +2,24 @@
 
 from __future__ import annotations
 
+import html
+
 
 SUBSCRIPTION_HOWTO = """📲 <b>Как подключиться</b>
 
 <b>✅ Happ (проще всего)</b>
 1️⃣ Установите <b>Happ</b> из App Store или Google Play
-2️⃣ Нажмите <b>«Открыть в Happ»</b> ниже — подписка добавится сама
+2️⃣ Нажмите синюю ссылку <b>«Открыть в Happ»</b> ниже
 3️⃣ Включите VPN в Happ — готово ✨
 
 <b>📋 Другой клиент</b>
-Нажмите <b>«Скопировать ссылку»</b> → в приложении (v2rayNG, Streisand, Hiddify…) «Добавить подписку» / Import → вставьте."""
+Кнопка <b>«Скопировать ссылку»</b> → в приложении (v2rayNG, Streisand, Hiddify…) Import → вставьте."""
 
 SUBSCRIPTION_HOWTO_MULTI = """📲 <b>Как подключиться</b>
 
-<b>✅ Happ</b> — установите из магазина и нажмите <b>«Открыть в Happ»</b> ниже.
+<b>✅ Happ</b> — установите из магазина, нажмите синюю ссылку у нужной локации.
 
-<b>📋 Другой клиент</b> — кнопка <b>«Скопировать ссылку»</b> для каждой локации ниже."""
+<b>📋 Другой клиент</b> — кнопка <b>«Скопировать ссылку»</b> для каждой локации."""
 
 
 def welcome(name: str, *, approval: bool) -> str:
@@ -52,14 +54,24 @@ def subscription_header(device_label: str, expiry: str) -> str:
     return f"🛡 <b>{device_label}</b>\n📅 Активна до: <b>{expiry}</b>"
 
 
+def happ_link_html(happ_url: str, *, server_name: str = "") -> str:
+    """Кликабельная синяя ссылка в HTML-сообщении Telegram."""
+    href = html.escape(happ_url, quote=True)
+    link = f'<a href="{href}">Открыть в Happ</a>'
+    if server_name:
+        name = html.escape(server_name)
+        return f"📲 {link} — {name}"
+    return f"📲 {link}"
+
+
 def subscription_link_intro(*, multiserver: bool) -> str:
     if multiserver:
-        return "🔗 <b>Запасная ссылка</b> (если кнопка копирования не сработала):"
-    return "🔗 <b>Запасная ссылка</b> (если кнопка копирования не сработала):"
+        return "🔗 <b>Ссылка подписки</b> (для ручного импорта):"
+    return "🔗 <b>Ссылка подписки</b> (для ручного импорта):"
 
 
 def subscription_links_multi_header() -> str:
-    return "🔗 <b>Запасные ссылки</b> по локациям:"
+    return "🔗 <b>Ссылки подписки</b> по локациям:"
 
 
 # --- Кнопки ---
@@ -68,13 +80,8 @@ BTN_MY_SUBS = "📱 Мои подписки"
 BTN_BACK_MENU = "◀️ В меню"
 BTN_BACK_SUBS = "◀️ К подпискам"
 BTN_RENEW = "🔁 Продлить"
-BTN_OPEN_HAPP = "📲 Открыть в Happ"
 BTN_COPY_LINK = "📋 Скопировать ссылку"
 
-HAPP_OPEN_HINT = (
-    "📲 <b>Открыть Happ</b>\n\n"
-    "Нажмите на ссылку в сообщении ниже — откроется Happ."
-)
 COPY_LINK_SENT = "📋 Ссылка отправлена в чат — скопируйте и вставьте в клиент."
 BTN_AGREE = "✅ Принимаю"
 BTN_DECLINE = "❌ Не сейчас"
