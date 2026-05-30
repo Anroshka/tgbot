@@ -110,8 +110,10 @@ def build_subscription_link(
             )
             host = sub_domain.strip() or (u.hostname or "")
             scheme = (
-                "https" if has_tls else "http"
-            ) if sub_domain else (u.scheme or ("https" if has_tls else "http"))
+                ("https" if has_tls else "http")
+                if sub_domain
+                else (u.scheme or ("https" if has_tls else "http"))
+            )
             try:
                 port_int = int(sub_port) if sub_port is not None else 0
             except (TypeError, ValueError):
@@ -296,15 +298,15 @@ class PanelAPI:
                 logger.exception("Панель недоступна при логине %s: %s", path, e)
                 raise PanelAPIError("Панель недоступна. Попробуйте позже.") from e
             last_status = candidate.status_code
-            logger.info("POST /%s status=%s", path, candidate.status_code)
-            if candidate.status_code == 404:
+            logger.info("POST /%s status=%s", path, last_status)
+            if last_status == 404:
                 continue
             r = candidate
             break
 
         if r is None:
             raise PanelAPIError(
-                "Эндпоинт /login недоступен (HTTP 404). "
+                f"Эндпоинт /login недоступен (последний HTTP {last_status}). "
                 "Задайте PANEL_API_TOKEN в .env — для API логин/пароль не нужны."
             )
 
@@ -493,9 +495,7 @@ class PanelAPI:
         return sorted(available)
 
     @staticmethod
-    def _apply_telegram_id(
-        row: dict[str, Any], telegram_id: int | None
-    ) -> None:
+    def _apply_telegram_id(row: dict[str, Any], telegram_id: int | None) -> None:
         if not panel_set_telegram_id() or telegram_id is None:
             return
         try:
@@ -611,9 +611,7 @@ class PanelAPI:
             detail += f" tgId={payload['tgId']}"
         self._check_panel_json_response(r, "clients/update", detail)
 
-    async def _get_client(
-        self, email: str
-    ) -> tuple[dict[str, Any], list[int]] | None:
+    async def _get_client(self, email: str) -> tuple[dict[str, Any], list[int]] | None:
         enc = quote(email, safe="")
         r = await self._request_panel("GET", f"panel/api/clients/get/{enc}")
         if r.status_code == 404:

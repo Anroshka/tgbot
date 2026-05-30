@@ -1,0 +1,35 @@
+---
+description: Стандарты кода Tgbot и работа с aislop (качество перед коммитом)
+alwaysApply: true
+---
+
+# Tgbot — качество кода
+
+## Проект
+
+- Python 3, aiogram 3, SQLite (`bot.db`), модули в корне: `main.py`, `db.py`, `panel_api.py`, `bot_ui.py`, `vpn_legal.py`.
+- Импорты `bot_ui`, `db`, `panel_api`, `vpn_legal` — **локальные**, не добавлять в `requirements.txt`.
+
+## Перед завершением задачи
+
+1. Запустить `npx aislop fix` в корне проекта (формат, неиспользуемые импорты, мелкий slop).
+2. Запустить `npx aislop scan` — цель: score ≥ 70, без error-level lint (ruff).
+3. Исправить вручную то, что fix не трогает: F841, E741, логика.
+
+## Python-стиль
+
+- Не оставлять неиспользуемые импорты и переменные.
+- В `except` для реальных сбоев: `logger.exception(...)` или `logger.error(..., exc_info=True)`.
+- Не использовать однобуквенные имена вроде `l` в comprehensions — `link`, `name`.
+- Тексты пользователей — в `bot_ui.py`, юридический текст — только `vpn_legal.py`.
+- Минимальный diff: не рефакторить `main.py` на модули без запроса пользователя.
+
+## Telegram-бот
+
+- UI на inline-кнопках, `parse_mode="HTML"` где есть разметка.
+- Секреты только в `.env`, не коммитить `.env` и `bot.db`.
+
+## aislop
+
+- Конфиг: `.aislop/config.yml`.
+- `ai-slop/hallucinated-import` для этого репо отключён намеренно.

@@ -6,16 +6,21 @@ venv/
 __pycache__/
 *.pyc
 *.py[cod]
+*.egg-info/
+dist/
+build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 *.db
 *.sqlite3
+.aislop/
+node_modules/
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
 .DS_Store
 .idea/
 .vscode/
 *.log
-.cursor/
-
-# локальные резервные копии (scripts/backup_bot.py)
 backups/

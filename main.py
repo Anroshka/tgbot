@@ -21,10 +21,8 @@ from aiogram.types import (
     CopyTextButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
     LinkPreviewOptions,
     Message,
-    ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     User,
 )
@@ -40,7 +38,6 @@ from panel_api import (
     expiry_time_ms_for_days,
     inbound_ids_config,
     panel_client_email,
-    subscription_days,
     subscription_expiry_time_ms,
 )
 from vpn_legal import LEGAL_TEXT
@@ -65,6 +62,7 @@ APPROVAL_DURATION_CHOICES: tuple[int, ...] = (7, 30, 90, 180, 365)
 @dataclass
 class PanelConfig:
     """Конфиг одной 3x-ui панели (одного VPS)."""
+
     index: int
     name: str  # отображаемое название (гео)
     base_url: str
@@ -349,7 +347,9 @@ def _subscription_reply_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
-def _renewal_review_keyboard(tid: int, device_kind: str, slot_index: int) -> InlineKeyboardMarkup:
+def _renewal_review_keyboard(
+    tid: int, device_kind: str, slot_index: int
+) -> InlineKeyboardMarkup:
     """Клавиатура для админа: выбрать срок продления или отклонить."""
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
@@ -410,11 +410,18 @@ async def _refresh_sub_config() -> None:
                 cfg = await api.get_sub_config()
             if cfg:
                 panel.sub_config_cache = cfg
-                logger.info("Панель %s (%s): настройки подписки %s", panel.index, panel.name, cfg)
+                logger.info(
+                    "Панель %s (%s): настройки подписки %s",
+                    panel.index,
+                    panel.name,
+                    cfg,
+                )
         except Exception as e:
             logger.warning(
                 "Панель %s (%s): не удалось получить настройки подписки: %s",
-                panel.index, panel.name, e,
+                panel.index,
+                panel.name,
+                e,
             )
 
 
@@ -460,7 +467,9 @@ def _main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=ui.BTN_GET_ACCESS, callback_data="menu_get_access"),
+                InlineKeyboardButton(
+                    text=ui.BTN_GET_ACCESS, callback_data="menu_get_access"
+                ),
             ],
             [
                 InlineKeyboardButton(text=ui.BTN_MY_SUBS, callback_data="menu_my_subs"),
@@ -473,15 +482,17 @@ def _my_subs_keyboard(devices: list[db.UserDeviceRecord]) -> InlineKeyboardMarku
     buttons = []
     for d in devices:
         label = _device_subscription_label_from_parts(d.device_kind, d.slot_index)
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"🔹 {label}",
-                callback_data=f"sub_view:{d.device_kind}:{d.slot_index}"
-            )
-        ])
-    buttons.append([
-        InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")
-    ])
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🔹 {label}",
+                    callback_data=f"sub_view:{d.device_kind}:{d.slot_index}",
+                )
+            ]
+        )
+    buttons.append(
+        [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
+    )
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -585,9 +596,7 @@ def _format_request_who(req: db.AccessRequestRecord) -> str:
     parts: list[str] = []
     if req.username:
         parts.append(f"@{req.username}")
-    name = " ".join(
-        x for x in (req.first_name or "", req.last_name or "") if x
-    ).strip()
+    name = " ".join(x for x in (req.first_name or "", req.last_name or "") if x).strip()
     if name:
         parts.append(name)
     return " / ".join(parts) if parts else "без имени"
@@ -604,11 +613,11 @@ async def _notify_admins_new_request(bot: Bot, req: db.AccessRequestRecord) -> N
     kb = _access_review_keyboard(req.telegram_id)
     for admin_id in _admin_ids():
         try:
-            await bot.send_message(
-                admin_id, text, reply_markup=kb, parse_mode="HTML"
+            await bot.send_message(admin_id, text, reply_markup=kb, parse_mode="HTML")
+        except Exception as exc:
+            logger.exception(
+                "Не удалось отправить уведомление админу %s: %s", admin_id, exc
             )
-        except Exception:
-            logger.exception("Не удалось отправить уведомление админу %s", admin_id)
 
 
 async def _create_subscription_for_user(
@@ -628,7 +637,9 @@ async def _create_subscription_for_user(
     client_uuid = str(uuid.uuid4())
     sub = _sub_token()
     expiry_time_ms = (
-        expiry_time_ms_for_days(days) if days is not None else subscription_expiry_time_ms()
+        expiry_time_ms_for_days(days)
+        if days is not None
+        else subscription_expiry_time_ms()
     )
     api_panels = _api_panels()
     if not api_panels:
@@ -646,7 +657,10 @@ async def _create_subscription_for_user(
         except PanelAPIError as e:
             logger.warning(
                 "Ошибка панели %s (%s) для tg_id=%s: %s",
-                panel.index, panel.name, tid, e,
+                panel.index,
+                panel.name,
+                tid,
+                e,
             )
             return (
                 False,
@@ -658,7 +672,8 @@ async def _create_subscription_for_user(
         except Exception:
             logger.exception(
                 "Неожиданная ошибка при регистрации tg_id=%s на панели %s",
-                tid, panel.index,
+                tid,
+                panel.index,
             )
             return False, None, None, ui.ERR_GENERIC
     await db.create_user_device(
@@ -673,7 +688,9 @@ async def _create_subscription_for_user(
     return True, sub, expiry_time_ms, ""
 
 
-async def _send_subscription_reminder(bot: Bot, device: db.UserDeviceRecord, stage: str) -> bool:
+async def _send_subscription_reminder(
+    bot: Bot, device: db.UserDeviceRecord, stage: str
+) -> bool:
     label = _device_subscription_label_from_parts(device.device_kind, device.slot_index)
     expiry = _format_expiry_time_ms(device.expiry_time_ms)
     note = ui.REMINDER_NOTE
@@ -752,8 +769,8 @@ async def _subscription_reminder_worker(bot: Bot) -> None:
             await _send_due_subscription_reminders(bot)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("Ошибка фоновой проверки напоминаний")
+        except Exception as exc:
+            logger.exception("Ошибка фоновой проверки напоминаний: %s", exc)
         await asyncio.sleep(REMINDER_CHECK_INTERVAL_SECONDS)
 
 
@@ -780,7 +797,9 @@ async def get_access_text(message: Message) -> None:
         return
 
     if not _panels_configured():
-        logger.error("Не сконфигурирована ни одна панель (PANEL_BASE_URL_* / PANEL_LOGIN_* / PANEL_PASSWORD_*)")
+        logger.error(
+            "Не сконфигурирована ни одна панель (PANEL_BASE_URL_* / PANEL_LOGIN_* / PANEL_PASSWORD_*)"
+        )
         await message.answer(ui.ERR_NO_PANEL)
         return
 
@@ -790,7 +809,11 @@ async def get_access_text(message: Message) -> None:
             ui.ERR_ALREADY_REQUESTED,
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
+                    [
+                        InlineKeyboardButton(
+                            text=ui.BTN_BACK_MENU, callback_data="menu_main"
+                        )
+                    ]
                 ]
             ),
             parse_mode="HTML",
@@ -839,7 +862,11 @@ async def cb_menu_get_access(query: CallbackQuery) -> None:
                 ui.ERR_ALREADY_REQUESTED,
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
+                        [
+                            InlineKeyboardButton(
+                                text=ui.BTN_BACK_MENU, callback_data="menu_main"
+                            )
+                        ]
                     ]
                 ),
                 parse_mode="HTML",
@@ -892,8 +919,16 @@ async def cb_terms_decline(query: CallbackQuery) -> None:
                 ui.RULES_DECLINED,
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text=ui.BTN_GET_ACCESS, callback_data="menu_get_access")],
-                        [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
+                        [
+                            InlineKeyboardButton(
+                                text=ui.BTN_GET_ACCESS, callback_data="menu_get_access"
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text=ui.BTN_BACK_MENU, callback_data="menu_main"
+                            )
+                        ],
                     ]
                 ),
                 parse_mode="HTML",
@@ -932,11 +967,11 @@ async def admin_list_users(message: Message) -> None:
     for u in users:
         status = "✅ Подписал" if u["accepted"] else "❌ Не подписал"
         devices = f"({u['devices']} устр.)" if u["devices"] > 0 else "(нет подписок)"
-        
+
         user_display = f"<code>{u['tid']}</code>"
         if u["username"]:
             user_display = f"@{u['username']} ({user_display})"
-            
+
         line = f"• {user_display}: {status} {devices}"
         lines.append(line)
 
@@ -944,7 +979,7 @@ async def admin_list_users(message: Message) -> None:
     text = "\n".join(lines)
     if len(text) > 4000:
         for i in range(0, len(lines), 50):
-            chunk = "\n".join(lines[i:i+50])
+            chunk = "\n".join(lines[i : i + 50])
             await message.answer(chunk, parse_mode="HTML")
     else:
         await message.answer(text, parse_mode="HTML")
@@ -957,7 +992,9 @@ async def admin_user_info(message: Message) -> None:
 
     parts = message.text.split()
     if len(parts) < 2:
-        await message.answer("Использование: <code>/user_info [telegram_id]</code>", parse_mode="HTML")
+        await message.answer(
+            "Использование: <code>/user_info [telegram_id]</code>", parse_mode="HTML"
+        )
         return
 
     try:
@@ -968,7 +1005,10 @@ async def admin_user_info(message: Message) -> None:
 
     devices = await db.list_user_devices(target_tid)
     if not devices:
-        await message.answer(f"У пользователя <code>{target_tid}</code> нет активных подписок.", parse_mode="HTML")
+        await message.answer(
+            f"У пользователя <code>{target_tid}</code> нет активных подписок.",
+            parse_mode="HTML",
+        )
         return
 
     lines = [f"<b>Подписки пользователя <code>{target_tid}</code>:</b>\n"]
@@ -1006,7 +1046,9 @@ async def admin_send_to_user(message: Message, bot: Bot) -> None:
     try:
         target_tid = int(parts[1])
     except ValueError:
-        await message.answer("Некорректный Telegram ID (второй аргумент — целое число).")
+        await message.answer(
+            "Некорректный Telegram ID (второй аргумент — целое число)."
+        )
         return
 
     body = parts[2].strip()
@@ -1045,8 +1087,16 @@ async def cb_agreement_decline(query: CallbackQuery) -> None:
                 ui.AGREEMENT_DECLINED,
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text=ui.BTN_GET_ACCESS, callback_data="menu_get_access")],
-                        [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
+                        [
+                            InlineKeyboardButton(
+                                text=ui.BTN_GET_ACCESS, callback_data="menu_get_access"
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text=ui.BTN_BACK_MENU, callback_data="menu_main"
+                            )
+                        ],
                     ]
                 ),
                 parse_mode="HTML",
@@ -1069,8 +1119,16 @@ async def my_subscriptions_text(message: Message) -> None:
             ui.NO_SUBS_YET,
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text=ui.BTN_GET_ACCESS, callback_data="menu_get_access")],
-                    [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
+                    [
+                        InlineKeyboardButton(
+                            text=ui.BTN_GET_ACCESS, callback_data="menu_get_access"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text=ui.BTN_BACK_MENU, callback_data="menu_main"
+                        )
+                    ],
                 ]
             ),
             parse_mode="HTML",
@@ -1096,8 +1154,16 @@ async def cb_menu_my_subs(query: CallbackQuery) -> None:
                 ui.NO_SUBS_YET,
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text=ui.BTN_GET_ACCESS, callback_data="menu_get_access")],
-                        [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
+                        [
+                            InlineKeyboardButton(
+                                text=ui.BTN_GET_ACCESS, callback_data="menu_get_access"
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text=ui.BTN_BACK_MENU, callback_data="menu_main"
+                            )
+                        ],
                     ]
                 ),
                 parse_mode="HTML",
@@ -1211,8 +1277,8 @@ async def cb_copy_link_fallback(query: CallbackQuery, bot: Bot) -> None:
             sub_url,
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
-    except Exception:
-        logger.exception("Не удалось отправить ссылку пользователю %s", tid)
+    except Exception as exc:
+        logger.exception("Не удалось отправить ссылку пользователю %s: %s", tid, exc)
 
 
 @router.callback_query(F.data.startswith("rnw_req:"))
@@ -1356,13 +1422,17 @@ async def _extend_subscription_for_user(
         except PanelAPIError as e:
             logger.warning(
                 "Продление: ошибка панели %s (%s) для tg_id=%s: %s",
-                panel.index, panel.name, tid, e,
+                panel.index,
+                panel.name,
+                tid,
+                e,
             )
             return False, None, f"Ошибка панели «{panel.name}»: {e}"
         except Exception:
             logger.exception(
                 "Продление: неожиданная ошибка на панели %s для tg_id=%s",
-                panel.index, tid,
+                panel.index,
+                tid,
             )
             return False, None, f"Неожиданная ошибка на панели «{panel.name}»."
 
@@ -1433,8 +1503,10 @@ async def cb_renewal_approve(query: CallbackQuery, bot: Bot) -> None:
             ),
             parse_mode="HTML",
         )
-    except Exception:
-        logger.exception("Не удалось уведомить пользователя %s о продлении", tid)
+    except Exception as exc:
+        logger.exception(
+            "Не удалось уведомить пользователя %s о продлении: %s", tid, exc
+        )
 
     if query.message:
         status_text = f"\n\n✅ <b>Продлено на {days} дн. до {_format_expiry_time_ms(new_expiry_ms)}</b>"
@@ -1442,7 +1514,7 @@ async def cb_renewal_approve(query: CallbackQuery, bot: Bot) -> None:
             await query.message.edit_text(
                 text=(query.message.html_text or "") + status_text,
                 reply_markup=None,
-                parse_mode="HTML"
+                parse_mode="HTML",
             )
 
 
@@ -1474,19 +1546,20 @@ async def cb_renewal_reject(query: CallbackQuery, bot: Bot) -> None:
     await db.delete_renewal_request(tid, device_kind, slot_index)
     await query.answer("Отклонено.")
 
-    label = _device_subscription_label_from_parts(device_kind, slot_index)
     try:
         await bot.send_message(tid, ui.RENEWAL_REJECTED, parse_mode="HTML")
     except Exception:
-        logger.exception("Не удалось уведомить пользователя %s об отказе в продлении", tid)
+        logger.exception(
+            "Не удалось уведомить пользователя %s об отказе в продлении", tid
+        )
 
     if query.message:
-        status_text = f"\n\n❌ <b>Запрос на продление отклонён</b>"
+        status_text = "\n\n❌ <b>Запрос на продление отклонён</b>"
         with suppress(Exception):
             await query.message.edit_text(
                 text=(query.message.html_text or "") + status_text,
                 reply_markup=None,
-                parse_mode="HTML"
+                parse_mode="HTML",
             )
 
 
@@ -1540,7 +1613,11 @@ async def cb_device_chosen(query: CallbackQuery, bot: Bot) -> None:
                     ui.ERR_REQUEST_SENT,
                     reply_markup=InlineKeyboardMarkup(
                         inline_keyboard=[
-                            [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
+                            [
+                                InlineKeyboardButton(
+                                    text=ui.BTN_BACK_MENU, callback_data="menu_main"
+                                )
+                            ]
                         ]
                     ),
                     parse_mode="HTML",
@@ -1644,21 +1721,21 @@ async def cb_approve_access(query: CallbackQuery, bot: Bot) -> None:
             parse_mode="HTML",
         )
         delivered = True
-    except Exception:
-        logger.exception("Не удалось написать пользователю %s", tid)
+    except Exception as exc:
+        logger.exception("Не удалось написать пользователю %s: %s", tid, exc)
 
     if query.message:
         status_text = (
             f"\n\n✅ <b>Выдано пользователю <code>{tid}</code></b>"
             if delivered
             else f"\n\n⚠️ <b>Создано для <code>{tid}</code>, но не доставлено в ЛС (нужен чат с ботом)</b>\n"
-                 + "\n".join(f"{n}: {l}" for n, l in links)
+            + "\n".join(f"{n}: {link}" for n, link in links)
         )
         with suppress(Exception):
             await query.message.edit_text(
                 text=(query.message.html_text or "") + status_text,
                 reply_markup=None,
-                parse_mode="HTML"
+                parse_mode="HTML",
             )
 
 
@@ -1683,8 +1760,8 @@ async def cb_reject_access(query: CallbackQuery, bot: Bot) -> None:
 
     try:
         await bot.send_message(tid, ui.ACCESS_REJECTED, parse_mode="HTML")
-    except Exception:
-        logger.exception("Не удалось уведомить пользователя %s об отказе", tid)
+    except Exception as exc:
+        logger.exception("Не удалось уведомить пользователя %s об отказе: %s", tid, exc)
 
     if query.message:
         status_text = f"\n\n❌ <b>Заявка пользователя <code>{tid}</code> отклонена</b>"
@@ -1692,7 +1769,7 @@ async def cb_reject_access(query: CallbackQuery, bot: Bot) -> None:
             await query.message.edit_text(
                 text=(query.message.html_text or "") + status_text,
                 reply_markup=None,
-                parse_mode="HTML"
+                parse_mode="HTML",
             )
 
 

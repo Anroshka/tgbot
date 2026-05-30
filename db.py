@@ -67,9 +67,7 @@ async def _migrate_schema(conn: aiosqlite.Connection) -> None:
     cur = await conn.execute("PRAGMA table_info(user_devices)")
     user_device_cols = {r[1] for r in await cur.fetchall()}
     if "expiry_time_ms" not in user_device_cols:
-        await conn.execute(
-            "ALTER TABLE user_devices ADD COLUMN expiry_time_ms INTEGER"
-        )
+        await conn.execute("ALTER TABLE user_devices ADD COLUMN expiry_time_ms INTEGER")
     if "reminder_3d_sent_at" not in user_device_cols:
         await conn.execute(
             "ALTER TABLE user_devices ADD COLUMN reminder_3d_sent_at TEXT"
@@ -90,7 +88,9 @@ async def _migrate_schema(conn: aiosqlite.Connection) -> None:
         """,
         (subscription_days(),),
     )
-    cur = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    cur = await conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='users'"
+    )
     if await cur.fetchone():
         await conn.execute(
             """
@@ -330,9 +330,7 @@ async def mark_subscription_notice_sent(
 
 async def count_distinct_subscribers() -> int:
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "SELECT COUNT(DISTINCT telegram_id) FROM user_devices"
-        )
+        cur = await db.execute("SELECT COUNT(DISTINCT telegram_id) FROM user_devices")
         row = await cur.fetchone()
     return int(row[0]) if row else 0
 
@@ -367,8 +365,9 @@ async def list_users_legal_status() -> list[dict]:
                 "tid": r[0],
                 "accepted": r[1] is not None and r[2] is not None,
                 "devices": r[3],
-                "username": r[4]
-            } for r in rows
+                "username": r[4],
+            }
+            for r in rows
         ]
 
 

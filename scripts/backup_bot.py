@@ -75,7 +75,9 @@ def main() -> int:
 
     if args.zip:
         archive_base = BACKUPS_DIR / f"backup_{stamp}"
-        shutil.make_archive(str(archive_base), "zip", root_dir=dest.parent, base_dir=dest.name)
+        shutil.make_archive(
+            str(archive_base), "zip", root_dir=dest.parent, base_dir=dest.name
+        )
         shutil.rmtree(dest)
         print(f"Архив: {archive_base.with_suffix('.zip')}")
 
