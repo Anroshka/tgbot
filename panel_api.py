@@ -543,7 +543,6 @@ class PanelAPI:
             row["password"] = client_uuid
         if "trojan" not in protos or len(protos) > 1:
             row["id"] = client_uuid
-        # flow для новых клиентов не задаём (только сохраняем из existing при продлении).
         return row
 
     async def _add_client(

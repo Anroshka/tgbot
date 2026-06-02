@@ -114,6 +114,17 @@ def _receipt_item(days: int, amount: int, *, email: str | None) -> dict[str, Any
     return item
 
 
+def _send_receipt() -> bool:
+    """Отправлять ли чек 54-ФЗ в API ЮKassa.
+
+    - "1" — ИП/ООО с онлайн-кассой: чек обязателен, нужно передавать `customer`.
+      В этом случае email юзера должен быть в `create_payment(email=...)`.
+    - "0" (по умолчанию) — самозанятый: чеки выдаются через «Мой налог»,
+      в API `receipt` не передаём.
+    """
+    return os.getenv("YOOKASSA_SEND_RECEIPT", "0").strip() == "1"
+
+
 def create_payment(
     *,
     days: int,
@@ -139,12 +150,6 @@ def create_payment(
     description = f"Подписка Vibecode VPN на {days} дней"
     return_url = get_return_url()
 
-    receipt: dict[str, Any] = {
-        "items": [_receipt_item(days, amount_rub, email=email)],
-    }
-    if email:
-        receipt["customer"] = {"email": email}
-
     payload: dict[str, Any] = {
         "amount": {"value": f"{amount_rub}.00", "currency": "RUB"},
         "confirmation": {
@@ -159,8 +164,18 @@ def create_payment(
             "slot_index": str(slot_index),
             "days": str(days),
         },
-        "receipt": receipt,
     }
+
+    if _send_receipt():
+        if not email:
+            raise RuntimeError(
+                "YOOKASSA_SEND_RECEIPT=1 требует email юзера "
+                "(передайте email= в create_payment)"
+            )
+        payload["receipt"] = {
+            "customer": {"email": email},
+            "items": [_receipt_item(days, amount_rub, email=email)],
+        }
 
     try:
         payment = Payment.create(payload, idempotence_key)
