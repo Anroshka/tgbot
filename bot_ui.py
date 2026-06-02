@@ -53,7 +53,6 @@ def device_selection(*, approval: bool) -> str:
 def plan_selection() -> str:
     return (
         "📅 <b>Выберите срок подписки:</b>\n\n"
-        "Чем дольше срок — тем выгоднее каждый месяц."
     )
 
 
@@ -176,5 +175,5 @@ PAYMENT_EXPIRED = (
 )
 PAYMENT_CANCELED = "❌ Счёт отменён. Можно оформить новый в любой момент."
 
-# Маркер в тексте подписки (для edit после «Продлить»)
+
 SUBSCRIPTION_MSG_MARKER = "🔗"
