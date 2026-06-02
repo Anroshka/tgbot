@@ -30,6 +30,7 @@ from dotenv import load_dotenv
 
 import bot_ui as ui
 import db
+import payments
 from panel_api import (
     PANEL_API_BUILD,
     PanelAPI,
@@ -54,9 +55,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID_RAW = os.getenv("ADMIN_ID", "0").strip()
 # Несколько админов: ADMINS=111,222,333 (приоритетнее одиночного ADMIN_ID)
 ADMINS_RAW = os.getenv("ADMINS", "").strip()
-
-# Варианты срока подписки (в днях), которые админ выбирает кнопкой при одобрении.
-APPROVAL_DURATION_CHOICES: tuple[int, ...] = (7, 30, 90, 180, 365)
 
 
 @dataclass
@@ -213,11 +211,6 @@ def _is_admin(user_id: int | None) -> bool:
     return user_id in _admin_ids()
 
 
-def _require_approval() -> bool:
-    v = os.getenv("REQUIRE_APPROVAL", "1").strip().lower()
-    return v not in ("0", "false", "no", "off", "")
-
-
 def _sanitize_nick(user: User | None) -> str:
     if user is None:
         return "user_unknown"
@@ -347,35 +340,6 @@ def _subscription_reply_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
-def _renewal_review_keyboard(
-    tid: int, device_kind: str, slot_index: int
-) -> InlineKeyboardMarkup:
-    """Клавиатура для админа: выбрать срок продления или отклонить."""
-    rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
-    for days in APPROVAL_DURATION_CHOICES:
-        row.append(
-            InlineKeyboardButton(
-                text=ui.BTN_ADMIN_APPROVE_DAYS.format(days=days),
-                callback_data=f"rnw_apr:{tid}:{device_kind}:{slot_index}:{days}",
-            )
-        )
-        if len(row) == 3:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text=ui.BTN_ADMIN_REJECT,
-                callback_data=f"rnw_rej:{tid}:{device_kind}:{slot_index}",
-            )
-        ]
-    )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
 def _panel_base_email(nick: str, device_kind: str, slot_index: int) -> str:
     """Префикс для панели: phone_nick, второй смартфон — phone_nick2 (далее _1.._4 — inbound)."""
     p = EMAIL_PREFIX.get(device_kind, "other")
@@ -449,6 +413,19 @@ def _panels_configured() -> bool:
     return _master_panel() is not None
 
 
+# URL страницы с публичной офертой и политикой конфиденциальности на сайте.
+# Если задан — в боте показывается короткое сообщение со ссылкой.
+# Если пусто — fallback на полный текст LEGAL_TEXT из vpn_legal.py.
+OFFER_URL = _env("OFFER_URL")
+
+
+def _legal_text() -> str:
+    """Текст согласия: короткая ссылка на сайт, или полный текст из vpn_legal."""
+    if OFFER_URL:
+        return ui.offer_prompt(OFFER_URL)
+    return LEGAL_TEXT
+
+
 def _greeting_name(user: User | None) -> str:
     if user is None:
         return "друг"
@@ -460,7 +437,7 @@ def _greeting_name(user: User | None) -> str:
 
 
 def _welcome_text(user: User | None) -> str:
-    return ui.welcome(_greeting_name(user), approval=_require_approval())
+    return ui.welcome(_greeting_name(user), approval=True)
 
 
 def _main_keyboard() -> InlineKeyboardMarkup:
@@ -494,29 +471,6 @@ def _my_subs_keyboard(devices: list[db.UserDeviceRecord]) -> InlineKeyboardMarku
         [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
     )
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-def _device_inline_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="📱 Смартфон", callback_data="dev:phone"),
-                InlineKeyboardButton(text="💻 Ноутбук", callback_data="dev:laptop"),
-            ],
-            [
-                InlineKeyboardButton(text="🖥 ПК", callback_data="dev:pc"),
-                InlineKeyboardButton(text="📟 Другое", callback_data="dev:other"),
-            ],
-            [
-                InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main"),
-            ],
-        ]
-    )
-
-
-def _device_selection_text() -> str:
-    """Текст перед выбором устройства (оплата + тариф при модели с заявкой админу)."""
-    return ui.device_selection(approval=_require_approval())
 
 
 def _terms_inline_keyboard() -> InlineKeyboardMarkup:
@@ -565,58 +519,35 @@ def _agreement_inline_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _access_review_keyboard(target_telegram_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура одобрения заявки: срок выбирает админ (дни)."""
-    rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
-    for days in APPROVAL_DURATION_CHOICES:
-        row.append(
-            InlineKeyboardButton(
-                text=ui.BTN_ADMIN_APPROVE_DAYS.format(days=days),
-                callback_data=f"apr:{target_telegram_id}:{days}",
-            )
-        )
-        if len(row) == 3:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text=ui.BTN_ADMIN_REJECT,
-                callback_data=f"rej:{target_telegram_id}",
-            )
-        ]
-    )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _format_request_who(req: db.AccessRequestRecord) -> str:
+def _format_payment_who(record: db.PaymentRecord) -> str:
     parts: list[str] = []
-    if req.username:
-        parts.append(f"@{req.username}")
-    name = " ".join(x for x in (req.first_name or "", req.last_name or "") if x).strip()
+    if record.username:
+        parts.append(f"@{record.username}")
+    name = " ".join(
+        x for x in (record.first_name or "", record.last_name or "") if x
+    ).strip()
     if name:
         parts.append(name)
     return " / ".join(parts) if parts else "без имени"
 
 
-async def _notify_admins_new_request(bot: Bot, req: db.AccessRequestRecord) -> None:
-    text = ui.ADMIN_NEW_ACCESS.format(
-        tid=req.telegram_id,
-        who=_format_request_who(req),
-        device=_device_label_ru(req.device_kind),
-        slot=req.slot_index,
-        email=req.base_email,
+async def _notify_admins_new_payment(bot: Bot, record: db.PaymentRecord) -> None:
+    """Уведомление админам о новом платеже (информативно)."""
+    text = ui.ADMIN_NEW_PAYMENT.format(
+        tid=record.telegram_id,
+        who=_format_payment_who(record),
+        device=_device_label_ru(record.device_kind),
+        slot=record.slot_index,
+        days=record.plan_days,
+        amount=record.amount,
+        payment_id=record.yookassa_payment_id,
     )
-    kb = _access_review_keyboard(req.telegram_id)
     for admin_id in _admin_ids():
         try:
-            await bot.send_message(admin_id, text, reply_markup=kb, parse_mode="HTML")
-        except Exception as exc:
+            await bot.send_message(admin_id, text, parse_mode="HTML")
+        except Exception:
             logger.exception(
-                "Не удалось отправить уведомление админу %s: %s", admin_id, exc
+                "Не удалось уведомить админа %s о платеже", admin_id
             )
 
 
@@ -804,7 +735,7 @@ async def get_access_text(message: Message) -> None:
         return
 
     tid = message.from_user.id
-    if await db.get_access_request(tid):
+    if await db.get_active_payment(tid) is not None:
         await message.answer(
             ui.ERR_ALREADY_REQUESTED,
             reply_markup=InlineKeyboardMarkup(
@@ -822,14 +753,14 @@ async def get_access_text(message: Message) -> None:
 
     if not await db.has_accepted_user_agreement(tid):
         await message.answer(
-            LEGAL_TEXT,
+            _legal_text(),
             reply_markup=_agreement_inline_keyboard(),
         )
         return
 
     await message.answer(
-        _device_selection_text(),
-        reply_markup=_device_inline_keyboard(),
+        ui.device_selection(approval=True),
+        reply_markup=_plan_inline_keyboard(),
         parse_mode="HTML",
     )
 
@@ -856,7 +787,16 @@ async def cb_menu_get_access(query: CallbackQuery) -> None:
         await query.answer(ui.ERR_NO_PANEL, show_alert=True)
         return
 
-    if await db.get_access_request(tid):
+    if not await db.has_accepted_user_agreement(tid):
+        with suppress(Exception):
+            await query.message.edit_text(
+                _legal_text(),
+                reply_markup=_agreement_inline_keyboard(),
+            )
+        await query.answer()
+        return
+
+    if await db.get_active_payment(tid) is not None:
         with suppress(Exception):
             await query.message.edit_text(
                 ui.ERR_ALREADY_REQUESTED,
@@ -874,19 +814,10 @@ async def cb_menu_get_access(query: CallbackQuery) -> None:
         await query.answer()
         return
 
-    if not await db.has_accepted_user_agreement(tid):
-        with suppress(Exception):
-            await query.message.edit_text(
-                LEGAL_TEXT,
-                reply_markup=_agreement_inline_keyboard(),
-            )
-        await query.answer()
-        return
-
     with suppress(Exception):
         await query.message.edit_text(
-            _device_selection_text(),
-            reply_markup=_device_inline_keyboard(),
+            ui.device_selection(approval=True),
+            reply_markup=_plan_inline_keyboard(),
             parse_mode="HTML",
         )
     await query.answer()
@@ -902,7 +833,7 @@ async def cb_terms_accept(query: CallbackQuery) -> None:
     if query.message:
         with suppress(Exception):
             await query.message.edit_text(
-                LEGAL_TEXT,
+                _legal_text(),
                 reply_markup=_agreement_inline_keyboard(),
             )
 
@@ -947,8 +878,8 @@ async def cb_agreement_accept(query: CallbackQuery) -> None:
     if query.message:
         with suppress(Exception):
             await query.message.edit_text(
-                _device_selection_text(),
-                reply_markup=_device_inline_keyboard(),
+                ui.device_selection(approval=True),
+                reply_markup=_plan_inline_keyboard(),
                 parse_mode="HTML",
             )
 
@@ -1202,10 +1133,14 @@ async def cb_sub_view(query: CallbackQuery) -> None:
         await query.answer(ui.ERR_SUB_NOT_FOUND, show_alert=True)
         return
 
-    req = await db.get_renewal_request(tid, device_kind, slot_index)
-    renewal_note = ""
-    if req:
-        renewal_note = ui.RENEWAL_PENDING_NOTE
+    pending = await db.get_active_payment(tid)
+    show_renew = not (
+        pending is not None
+        and pending.device_kind == device_kind
+        and pending.slot_index == slot_index
+        and pending.kind == "renewal"
+    )
+    renewal_note = ui.RENEWAL_PENDING_NOTE if not show_renew else ""
 
     text = _subscription_message_text(
         _device_subscription_label_from_parts(device_kind, slot_index),
@@ -1220,7 +1155,7 @@ async def cb_sub_view(query: CallbackQuery) -> None:
         device_label=label,
         device_kind=device_kind,
         slot_index=slot_index,
-        show_renew=not req,
+        show_renew=show_renew,
         back_subs=True,
         back_menu=True,
     )
@@ -1283,7 +1218,7 @@ async def cb_copy_link_fallback(query: CallbackQuery, bot: Bot) -> None:
 
 @router.callback_query(F.data.startswith("rnw_req:"))
 async def cb_renewal_request(query: CallbackQuery, bot: Bot) -> None:
-    """Пользователь нажал «🔁 Продлить» у конкретной подписки."""
+    """Пользователь нажал «🔁 Продлить» → предлагаем выбрать тариф."""
     if query.from_user is None or not query.data:
         await query.answer()
         return
@@ -1304,81 +1239,238 @@ async def cb_renewal_request(query: CallbackQuery, bot: Bot) -> None:
         await query.answer(ui.ERR_SUB_NOT_FOUND, show_alert=True)
         return
 
-    inserted = await db.try_insert_renewal_request(
-        tid,
-        device_kind,
-        slot_index,
-        query.from_user.username,
-        query.from_user.first_name,
-        query.from_user.last_name,
+    # Шаг 1 для продления: показать клавиатуру тарифов с пометкой устройства
+    prices = payments.load_plan_prices()
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for d in sorted(prices):
+        amount = prices[d]
+        cb = f"rnw_plan:{device_kind}:{slot_index}:{d}"
+        row.append(
+            InlineKeyboardButton(
+                text=ui.BTN_PLAN_PREFIX.format(days=d, amount=amount),
+                callback_data=cb,
+            )
+        )
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=ui.BTN_BACK_SUBS, callback_data="menu_my_subs"
+            )
+        ]
     )
-    if not inserted:
-        await query.answer(ui.ERR_RENEW_PENDING, show_alert=True)
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    text = f"🔁 <b>Продление подписки</b>\n\n{ui.plan_selection()}"
+    if query.message:
+        with suppress(Exception):
+            await query.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("rnw_plan:"))
+async def cb_renewal_plan_chosen(query: CallbackQuery, bot: Bot) -> None:
+    """Продление: выбран тариф → создаём платёж в ЮKassa."""
+    if query.from_user is None:
+        await query.answer()
+        return
+    parts = (query.data or "").split(":")
+    if len(parts) != 4:
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
+        return
+    try:
+        device_kind = parts[1]
+        slot_index = int(parts[2])
+        days = int(parts[3])
+    except ValueError:
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
         return
 
-    req = await db.get_renewal_request(tid, device_kind, slot_index)
-    if req is not None:
-        await _notify_admins_renewal_request(bot, req)
+    tid = query.from_user.id
+    device = await db.get_user_device(tid, device_kind, slot_index)
+    if device is None:
+        await query.answer(ui.ERR_SUB_NOT_FOUND, show_alert=True)
+        return
 
-    await query.answer(ui.RENEWAL_SENT_ALERT, show_alert=True)
-    if query.message:
-        msg_text = query.message.text or ""
-        if ui.SUBSCRIPTION_MSG_MARKER in msg_text:
-            label = _device_subscription_label_from_parts(device_kind, slot_index)
-            text = _subscription_message_text(
-                label,
-                device.expiry_time_ms,
-                _all_links(device.sub_token),
-                renewal_note=ui.RENEWAL_SENT_BODY,
-            )
-            kb = _subscription_reply_keyboard(
-                sub_token=device.sub_token,
-                device_label=label,
-                device_kind=device_kind,
-                slot_index=slot_index,
-                back_subs=True,
-                back_menu=True,
-            )
-            with suppress(Exception):
-                await query.message.edit_text(
-                    text,
-                    reply_markup=kb,
-                    parse_mode="HTML",
-                )
-        else:
-            with suppress(Exception):
-                await query.message.edit_text(
-                    text=f"{msg_text}\n\n{ui.RENEWAL_SENT_BODY}",
-                    reply_markup=None,
-                    parse_mode="HTML",
-                )
-
-
-async def _notify_admins_renewal_request(
-    bot: Bot, req: db.RenewalRequestRecord
-) -> None:
-    who_parts: list[str] = []
-    if req.username:
-        who_parts.append(f"@{req.username}")
-    name = " ".join(x for x in (req.first_name or "", req.last_name or "") if x).strip()
-    if name:
-        who_parts.append(name)
-    who = " / ".join(who_parts) if who_parts else "без имени"
-    text = ui.ADMIN_RENEWAL.format(
-        tid=req.telegram_id,
-        who=who,
-        device=_device_label_ru(req.device_kind),
-        slot=req.slot_index,
-        expiry=_format_expiry_time_ms(req.current_expiry_time_ms),
+    record, err = await _create_payment_for_user(
+        bot,
+        kind="renewal",
+        query_from_user=query.from_user,
+        days=days,
+        device_kind=device_kind,
+        slot_index=slot_index,
+        base_email=device.base_email,
     )
-    kb = _renewal_review_keyboard(req.telegram_id, req.device_kind, req.slot_index)
-    for admin_id in _admin_ids():
-        try:
-            await bot.send_message(admin_id, text, reply_markup=kb, parse_mode="HTML")
-        except Exception:
-            logger.exception(
-                "Не удалось отправить заявку на продление админу %s", admin_id
+    if record is None:
+        await query.answer(err or ui.ERR_GENERIC, show_alert=True)
+        return
+
+    label = _device_subscription_label_from_parts(device_kind, slot_index)
+    text = (
+        f"🔁 <b>Счёт на продление</b>\n\n"
+        f"🛒 Тариф: <b>{days} дней</b>\n"
+        f"📱 Устройство: <b>{label}</b>\n"
+        f"💵 К оплате: <b>{record.amount} ₽</b>\n\n"
+        f"{ui.PAYMENT_CREATED}\n\n"
+        f"💡 Ссылку менять не нужно — после оплаты срок продлится автоматически."
+    )
+    if query.message:
+        with suppress(Exception):
+            await query.message.edit_text(
+                text, reply_markup=_payment_keyboard(record), parse_mode="HTML"
             )
+    await query.answer(ui.PAYMENT_CREATED, show_alert=True)
+
+
+def _plan_inline_keyboard() -> InlineKeyboardMarkup:
+    """Шаг 1: выбор тарифа (срока подписки)."""
+    prices = payments.load_plan_prices()
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for days in sorted(prices):
+        amount = prices[days]
+        row.append(
+            InlineKeyboardButton(
+                text=ui.BTN_PLAN_PREFIX.format(days=days, amount=amount),
+                callback_data=f"plan:{days}",
+            )
+        )
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(
+        [InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _device_inline_keyboard_for_plan(days: int) -> InlineKeyboardMarkup:
+    """Шаг 2: выбор устройства (после выбора тарифа)."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text="📱 Смартфон", callback_data=f"plan_dev:{days}:phone"
+            ),
+            InlineKeyboardButton(
+                text="💻 Ноутбук", callback_data=f"plan_dev:{days}:laptop"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🖥 ПК", callback_data=f"plan_dev:{days}:pc"
+            ),
+            InlineKeyboardButton(
+                text="📟 Другое", callback_data=f"plan_dev:{days}:other"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=ui.BTN_BACK_TO_PLANS, callback_data="menu_get_access"
+            ),
+        ],
+        [
+            InlineKeyboardButton(text=ui.BTN_BACK_MENU, callback_data="menu_main"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _payment_keyboard(record: db.PaymentRecord) -> InlineKeyboardMarkup:
+    """Кнопки для оплаты + проверка статуса + отмена."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if record.confirmation_url:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=ui.BTN_PAY.format(amount=record.amount),
+                    url=record.confirmation_url,
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=ui.BTN_CHECK_PAYMENT,
+                callback_data=f"pay_check:{record.yookassa_payment_id}",
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=ui.BTN_CANCEL_PAYMENT,
+                callback_data=f"pay_cancel:{record.yookassa_payment_id}",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _create_payment_for_user(
+    bot: Bot,
+    *,
+    kind: str,
+    query_from_user: User,
+    days: int,
+    device_kind: str,
+    slot_index: int,
+    base_email: str,
+) -> tuple[db.PaymentRecord | None, str | None]:
+    """Создаёт платёж в ЮKassa и запись в БД. Возвращает (record, error_text)."""
+    if not payments.is_configured():
+        return None, "Оплата временно недоступна (ЮKassa не настроена)."
+
+    # Не больше одного pending на пользователя
+    existing = await db.get_active_payment(query_from_user.id)
+    if existing is not None:
+        return None, ui.ERR_REQUEST_ALREADY
+
+    try:
+        amount = payments.plan_amount(days)
+    except ValueError as e:
+        return None, f"Тариф недоступен: {e}"
+
+    try:
+        yookassa = payments.create_payment(
+            days=days,
+            amount_rub=amount,
+            telegram_id=query_from_user.id,
+            device_kind=device_kind,
+            slot_index=slot_index,
+        )
+    except Exception as e:
+        logger.exception("Не удалось создать платёж в ЮKassa: %s", e)
+        return None, "Не удалось создать счёт. Попробуйте позже."
+
+    record = await db.try_create_payment(
+        telegram_id=query_from_user.id,
+        username=query_from_user.username,
+        first_name=query_from_user.first_name,
+        last_name=query_from_user.last_name,
+        kind=kind,
+        device_kind=device_kind,
+        slot_index=slot_index,
+        base_email=base_email,
+        plan_days=days,
+        amount=amount,
+        yookassa_payment_id=yookassa["id"],
+        confirmation_url=yookassa.get("confirmation_url"),
+    )
+    if record is None:
+        # Уже был pending
+        return None, ui.ERR_REQUEST_ALREADY
+
+    # Уведомляем админов (информативно)
+    with suppress(Exception):
+        await _notify_admins_new_payment(bot, record)
+
+    return record, None
 
 
 async def _extend_subscription_for_user(
@@ -1450,325 +1542,186 @@ async def _extend_subscription_for_user(
 
 @router.callback_query(F.data.startswith("rnw_apr:"))
 async def cb_renewal_approve(query: CallbackQuery, bot: Bot) -> None:
-    if not _is_admin(query.from_user.id if query.from_user else None):
-        await query.answer("Нет прав.", show_alert=True)
-        return
-    parts = (query.data or "").split(":")
-    if len(parts) != 5:
-        await query.answer("Некорректные данные.", show_alert=True)
-        return
-    try:
-        tid = int(parts[1])
-        device_kind = parts[2]
-        slot_index = int(parts[3])
-        days = int(parts[4])
-    except ValueError:
-        await query.answer("Некорректные данные.", show_alert=True)
-        return
-
-    pending = await db.get_renewal_request(tid, device_kind, slot_index)
-    if pending is None:
-        await query.answer("Заявка уже обработана или отозвана.", show_alert=True)
-        if query.message:
-            with suppress(Exception):
-                await query.message.edit_reply_markup(reply_markup=None)
-        return
-
-    ok, new_expiry_ms, err = await _extend_subscription_for_user(
-        tid, device_kind, slot_index, days
-    )
-    if not ok or new_expiry_ms is None:
-        await query.answer((err or "Ошибка")[:180], show_alert=True)
-        return
-
-    await db.delete_renewal_request(tid, device_kind, slot_index)
-    await query.answer(f"Продлено на {days} дн.")
-
-    label = _device_subscription_label_from_parts(device_kind, slot_index)
-    device = await db.get_user_device(tid, device_kind, slot_index)
-    try:
-        await bot.send_message(
-            tid,
-            ui.RENEWAL_APPROVED.format(
-                label=label,
-                expiry=_format_expiry_time_ms(new_expiry_ms),
-            ),
-            reply_markup=_subscription_reply_keyboard(
-                sub_token=device.sub_token if device else None,
-                device_label=label,
-                device_kind=device_kind,
-                slot_index=slot_index,
-                back_subs=True,
-                back_menu=True,
-            ),
-            parse_mode="HTML",
-        )
-    except Exception as exc:
-        logger.exception(
-            "Не удалось уведомить пользователя %s о продлении: %s", tid, exc
-        )
-
-    if query.message:
-        status_text = f"\n\n✅ <b>Продлено на {days} дн. до {_format_expiry_time_ms(new_expiry_ms)}</b>"
-        with suppress(Exception):
-            await query.message.edit_text(
-                text=(query.message.html_text or "") + status_text,
-                reply_markup=None,
-                parse_mode="HTML",
-            )
+    # Удалено: продление теперь через оплату ЮKassa (webhook)
+    await query.answer("Устаревшая кнопка.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("rnw_rej:"))
 async def cb_renewal_reject(query: CallbackQuery, bot: Bot) -> None:
-    if not _is_admin(query.from_user.id if query.from_user else None):
-        await query.answer("Нет прав.", show_alert=True)
-        return
-    parts = (query.data or "").split(":")
-    if len(parts) != 4:
-        await query.answer("Некорректные данные.", show_alert=True)
-        return
-    try:
-        tid = int(parts[1])
-        device_kind = parts[2]
-        slot_index = int(parts[3])
-    except ValueError:
-        await query.answer("Некорректные данные.", show_alert=True)
-        return
-
-    pending = await db.get_renewal_request(tid, device_kind, slot_index)
-    if pending is None:
-        await query.answer("Заявка уже не активна.", show_alert=True)
-        if query.message:
-            with suppress(Exception):
-                await query.message.edit_reply_markup(reply_markup=None)
-        return
-
-    await db.delete_renewal_request(tid, device_kind, slot_index)
-    await query.answer("Отклонено.")
-
-    try:
-        await bot.send_message(tid, ui.RENEWAL_REJECTED, parse_mode="HTML")
-    except Exception:
-        logger.exception(
-            "Не удалось уведомить пользователя %s об отказе в продлении", tid
-        )
-
-    if query.message:
-        status_text = "\n\n❌ <b>Запрос на продление отклонён</b>"
-        with suppress(Exception):
-            await query.message.edit_text(
-                text=(query.message.html_text or "") + status_text,
-                reply_markup=None,
-                parse_mode="HTML",
-            )
-
-
-@router.callback_query(F.data.startswith("dev:"))
-async def cb_device_chosen(query: CallbackQuery, bot: Bot) -> None:
-    if query.from_user is None:
-        await query.answer()
-        return
-    kind = query.data.split(":", 1)[1]
-    if kind not in EMAIL_PREFIX:
-        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
-        return
-
-    tid = query.from_user.id
-    if not await db.has_accepted_user_agreement(tid):
-        await query.answer(ui.ERR_NEED_AGREEMENT, show_alert=True)
-        return
-
-    if await db.get_access_request(tid):
-        await query.answer(ui.ERR_WAIT_PREVIOUS, show_alert=True)
-        return
-
-    if not _panels_configured():
-        await query.answer(ui.ERR_SERVICE_DOWN, show_alert=True)
-        return
-
-    nick = _sanitize_nick(query.from_user)
-    n_same = await db.count_device_slots(tid, kind)
-    slot_index = n_same + 1
-    base_email = _panel_base_email(nick, kind, slot_index)
-
-    if _require_approval():
-        inserted = await db.try_insert_access_request(
-            tid,
-            query.from_user.username,
-            query.from_user.first_name,
-            query.from_user.last_name,
-            base_email,
-            kind,
-            slot_index,
-        )
-        if not inserted:
-            await query.answer(ui.ERR_REQUEST_ALREADY, show_alert=True)
-            return
-        req = await db.get_access_request(tid)
-        if req:
-            await _notify_admins_new_request(bot, req)
-        if query.message:
-            with suppress(Exception):
-                await query.message.edit_text(
-                    ui.ERR_REQUEST_SENT,
-                    reply_markup=InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [
-                                InlineKeyboardButton(
-                                    text=ui.BTN_BACK_MENU, callback_data="menu_main"
-                                )
-                            ]
-                        ]
-                    ),
-                    parse_mode="HTML",
-                )
-        await query.answer()
-        return
-
-    await _refresh_sub_config()
-    ok, sub, expiry_time_ms, err = await _create_subscription_for_user(
-        tid, base_email, kind, slot_index
-    )
-    if not ok or sub is None or expiry_time_ms is None:
-        await query.answer((err or "Ошибка")[:200], show_alert=True)
-        return
-    links = _all_links(sub)
-    if query.message:
-        label = _device_subscription_label_from_parts(kind, slot_index)
-        text = _subscription_message_text(
-            label,
-            expiry_time_ms,
-            links,
-        )
-        with suppress(Exception):
-            await query.message.edit_text(
-                text,
-                reply_markup=_subscription_reply_keyboard(
-                    sub_token=sub,
-                    device_label=label,
-                    device_kind=kind,
-                    slot_index=slot_index,
-                    back_subs=True,
-                    back_menu=True,
-                ),
-                parse_mode="HTML",
-            )
-    await query.answer(ui.DONE)
+    await query.answer("Устаревшая кнопка.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("apr:"))
 async def cb_approve_access(query: CallbackQuery, bot: Bot) -> None:
-    if not _is_admin(query.from_user.id if query.from_user else None):
-        await query.answer("Нет прав.", show_alert=True)
-        return
-    parts = (query.data or "").split(":")
-    try:
-        tid = int(parts[1])
-    except (IndexError, ValueError):
-        await query.answer("Неверные данные.", show_alert=True)
-        return
-    days: int | None = None
-    if len(parts) >= 3 and parts[2]:
-        try:
-            days = int(parts[2])
-        except ValueError:
-            days = None
-
-    pending = await db.get_access_request(tid)
-    if pending is None:
-        await query.answer("Заявка уже обработана или отозвана.", show_alert=True)
-        return
-
-    await _refresh_sub_config()
-    ok, sub, expiry_time_ms, err = await _create_subscription_for_user(
-        tid,
-        pending.base_email,
-        pending.device_kind,
-        pending.slot_index,
-        days=days,
-    )
-    if not ok or sub is None or expiry_time_ms is None:
-        msg = (err or "Ошибка")[:180]
-        await query.answer(msg, show_alert=True)
-        return
-
-    await db.delete_access_request(tid)
-    await query.answer("Доступ выдан.")
-
-    links = _all_links(sub)
-    label = _device_subscription_label_from_parts(
-        pending.device_kind,
-        pending.slot_index,
-    )
-    user_text = _subscription_message_text(
-        label,
-        expiry_time_ms,
-        links,
-    )
-    delivered = False
-    try:
-        await bot.send_message(
-            tid,
-            user_text,
-            reply_markup=_subscription_reply_keyboard(
-                sub_token=sub,
-                device_label=label,
-                device_kind=pending.device_kind,
-                slot_index=pending.slot_index,
-                back_subs=True,
-                back_menu=True,
-            ),
-            parse_mode="HTML",
-        )
-        delivered = True
-    except Exception as exc:
-        logger.exception("Не удалось написать пользователю %s: %s", tid, exc)
-
-    if query.message:
-        status_text = (
-            f"\n\n✅ <b>Выдано пользователю <code>{tid}</code></b>"
-            if delivered
-            else f"\n\n⚠️ <b>Создано для <code>{tid}</code>, но не доставлено в ЛС (нужен чат с ботом)</b>\n"
-            + "\n".join(f"{n}: {link}" for n, link in links)
-        )
-        with suppress(Exception):
-            await query.message.edit_text(
-                text=(query.message.html_text or "") + status_text,
-                reply_markup=None,
-                parse_mode="HTML",
-            )
+    await query.answer("Устаревшая кнопка.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("rej:"))
 async def cb_reject_access(query: CallbackQuery, bot: Bot) -> None:
-    if not _is_admin(query.from_user.id if query.from_user else None):
-        await query.answer("Нет прав.", show_alert=True)
+    await query.answer("Устаревшая кнопка.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("plan:"))
+async def cb_plan_chosen(query: CallbackQuery) -> None:
+    """Шаг 1 → шаг 2: выбран срок → выбор устройства."""
+    if query.from_user is None or not query.message:
+        await query.answer()
         return
     try:
-        tid = int(query.data.split(":", 1)[1])
+        days = int((query.data or "").split(":", 1)[1])
     except (IndexError, ValueError):
-        await query.answer("Неверные данные.", show_alert=True)
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
         return
-
-    pending = await db.get_access_request(tid)
-    if pending is None:
-        await query.answer("Заявка уже не активна.", show_alert=True)
+    prices = payments.load_plan_prices()
+    if days not in prices:
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
         return
+    if not await db.has_accepted_user_agreement(query.from_user.id):
+        await query.answer(ui.ERR_NEED_AGREEMENT, show_alert=True)
+        return
+    if await db.get_active_payment(query.from_user.id) is not None:
+        await query.answer(ui.ERR_ALREADY_REQUESTED, show_alert=True)
+        return
+    if not _panels_configured():
+        await query.answer(ui.ERR_NO_PANEL, show_alert=True)
+        return
+    text = (
+        f"{ui.device_selection(approval=True)}\n\n"
+        f"🛒 <b>Тариф:</b> {days} дней — <b>{prices[days]} ₽</b>\n\n"
+        f"👇 <b>Шаг 2 — ваше устройство:</b>"
+    )
+    with suppress(Exception):
+        await query.message.edit_text(
+            text, reply_markup=_device_inline_keyboard_for_plan(days), parse_mode="HTML"
+        )
+    await query.answer()
 
-    await db.delete_access_request(tid)
-    await query.answer("Отклонено.")
 
+@router.callback_query(F.data.startswith("plan_dev:"))
+async def cb_plan_device_chosen(query: CallbackQuery, bot: Bot) -> None:
+    """Шаг 2: выбран тариф + устройство → создаём платёж ЮKassa."""
+    if query.from_user is None:
+        await query.answer()
+        return
+    parts = (query.data or "").split(":")
+    if len(parts) != 3:
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
+        return
     try:
-        await bot.send_message(tid, ui.ACCESS_REJECTED, parse_mode="HTML")
-    except Exception as exc:
-        logger.exception("Не удалось уведомить пользователя %s об отказе: %s", tid, exc)
+        days = int(parts[1])
+        kind = parts[2]
+    except ValueError:
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
+        return
+    if kind not in EMAIL_PREFIX:
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
+        return
+    if not await db.has_accepted_user_agreement(query.from_user.id):
+        await query.answer(ui.ERR_NEED_AGREEMENT, show_alert=True)
+        return
+    if not _panels_configured():
+        await query.answer(ui.ERR_NO_PANEL, show_alert=True)
+        return
 
+    nick = _sanitize_nick(query.from_user)
+    n_same = await db.count_device_slots(query.from_user.id, kind)
+    slot_index = n_same + 1
+    base_email = _panel_base_email(nick, kind, slot_index)
+
+    record, err = await _create_payment_for_user(
+        bot,
+        kind="new",
+        query_from_user=query.from_user,
+        days=days,
+        device_kind=kind,
+        slot_index=slot_index,
+        base_email=base_email,
+    )
+    if record is None:
+        await query.answer(err or ui.ERR_GENERIC, show_alert=True)
+        return
+
+    label = _device_subscription_label_from_parts(kind, slot_index)
+    text = (
+        f"💳 <b>Счёт на оплату</b>\n\n"
+        f"🛒 Тариф: <b>{days} дней</b>\n"
+        f"📱 Устройство: <b>{label}</b>\n"
+        f"💵 К оплате: <b>{record.amount} ₽</b>\n\n"
+        f"{ui.PAYMENT_CREATED}"
+    )
     if query.message:
-        status_text = f"\n\n❌ <b>Заявка пользователя <code>{tid}</code> отклонена</b>"
         with suppress(Exception):
             await query.message.edit_text(
-                text=(query.message.html_text or "") + status_text,
-                reply_markup=None,
+                text, reply_markup=_payment_keyboard(record), parse_mode="HTML"
+            )
+    await query.answer(ui.PAYMENT_CREATED, show_alert=True)
+
+
+@router.callback_query(F.data.startswith("pay_check:"))
+async def cb_pay_check(query: CallbackQuery) -> None:
+    """Кнопка «Проверить оплату»: опрашиваем ЮKassa, на случай задержки вебхука."""
+    if query.from_user is None:
+        await query.answer()
+        return
+    payment_id = (query.data or "").split(":", 1)[1]
+    record = await db.get_payment_by_yookassa_id(payment_id)
+    if record is None or record.telegram_id != query.from_user.id:
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
+        return
+    if record.status == "succeeded":
+        await query.answer("Оплата уже получена — ссылка выше ✅", show_alert=True)
+        return
+    if record.status == "canceled":
+        await query.answer(ui.PAYMENT_EXPIRED, show_alert=True)
+        return
+    try:
+        info = payments.get_payment_status(payment_id)
+    except Exception:
+        await query.answer("Не удалось проверить. Попробуйте позже.", show_alert=True)
+        return
+    if info["status"] == "succeeded":
+        await query.answer("Оплата прошла! Подписка активируется через пару секунд ✅", show_alert=True)
+    else:
+        await query.answer(f"Статус: {info['status']}. Если платили — подождите немного.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("pay_cancel:"))
+async def cb_pay_cancel(query: CallbackQuery) -> None:
+    """Пользователь сам отменил неоплаченный счёт."""
+    if query.from_user is None:
+        await query.answer()
+        return
+    payment_id = (query.data or "").split(":", 1)[1]
+    record = await db.get_payment_by_yookassa_id(payment_id)
+    if record is None or record.telegram_id != query.from_user.id:
+        await query.answer(ui.ERR_BAD_DATA, show_alert=True)
+        return
+    if record.status != "pending":
+        await query.answer("Счёт уже не активен.", show_alert=True)
+        return
+    payments.cancel_payment(payment_id)
+    await db.mark_payment_canceled(payment_id)
+    await query.answer(ui.PAYMENT_CANCELED, show_alert=True)
+    if query.message:
+        with suppress(Exception):
+            await query.message.edit_text(
+                f"❌ Счёт отменён.\n\n"
+                f"Когда захотите — нажмите «🚀 Получить VPN» и оформите заново.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text=ui.BTN_GET_ACCESS,
+                                callback_data="menu_get_access",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text=ui.BTN_BACK_MENU, callback_data="menu_main"
+                            )
+                        ],
+                    ]
+                ),
                 parse_mode="HTML",
             )
 
@@ -1780,14 +1733,12 @@ async def cmd_stats(message: Message) -> None:
         return
     u = await db.count_distinct_subscribers()
     d = await db.count_devices()
-    p = await db.count_pending_requests()
-    r = await db.count_pending_renewals()
+    p = await db.count_pending_payments()
     await message.answer(
         f"📊 <b>Статистика</b>\n\n"
         f"👥 Пользователей: <b>{u}</b>\n"
         f"📱 Устройств: <b>{d}</b>\n"
-        f"🆕 Заявок на доступ: <b>{p}</b>\n"
-        f"🔁 На продление: <b>{r}</b>",
+        f"💳 Неоплаченных счетов: <b>{p}</b>",
         parse_mode="HTML",
     )
 
@@ -1840,9 +1791,10 @@ async def main() -> None:
 
     await db.init_db()
     await _refresh_sub_config()
-    if _require_approval() and not _admin_ids():
+    if not payments.is_configured():
         logger.warning(
-            "REQUIRE_APPROVAL=1, но не заданы ADMINS/ADMIN_ID — заявки некому подтверждать"
+            "ЮKassa не настроена (нет YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY) — "
+            "оплата работать не будет."
         )
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()

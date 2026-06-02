@@ -48,6 +48,25 @@ class AccessRequestRecord:
     slot_index: int
 
 
+@dataclass(frozen=True)
+class PaymentRecord:
+    id: int
+    telegram_id: int
+    username: str | None
+    first_name: str | None
+    last_name: str | None
+    kind: str  # "new" | "renewal"
+    device_kind: str
+    slot_index: int
+    base_email: str
+    plan_days: int
+    amount: int
+    yookassa_payment_id: str
+    confirmation_url: str | None
+    status: str  # "pending" | "succeeded" | "canceled"
+    created_at: str
+
+
 async def _migrate_schema(conn: aiosqlite.Connection) -> None:
     await conn.execute(
         """
@@ -169,6 +188,32 @@ async def _migrate_schema(conn: aiosqlite.Connection) -> None:
         SET agreement_accepted_at = accepted_at
         WHERE agreement_accepted_at IS NULL AND accepted_at IS NOT NULL
         """
+    )
+
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            kind TEXT NOT NULL,
+            device_kind TEXT NOT NULL,
+            slot_index INTEGER NOT NULL,
+            base_email TEXT NOT NULL,
+            plan_days INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            yookassa_payment_id TEXT NOT NULL UNIQUE,
+            confirmation_url TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_payments_tid_status ON payments(telegram_id, status)"
     )
 
 
@@ -649,5 +694,153 @@ async def delete_renewal_request(
 async def count_pending_renewals() -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT COUNT(*) FROM renewal_requests")
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+# --- Платежи ЮKassa -------------------------------------------------------
+
+
+def _row_to_payment(row) -> PaymentRecord:
+    return PaymentRecord(
+        id=row["id"],
+        telegram_id=row["telegram_id"],
+        username=row["username"],
+        first_name=row["first_name"],
+        last_name=row["last_name"],
+        kind=row["kind"],
+        device_kind=row["device_kind"],
+        slot_index=row["slot_index"],
+        base_email=row["base_email"],
+        plan_days=row["plan_days"],
+        amount=row["amount"],
+        yookassa_payment_id=row["yookassa_payment_id"],
+        confirmation_url=row["confirmation_url"],
+        status=row["status"],
+        created_at=row["created_at"],
+    )
+
+
+async def try_create_payment(
+    *,
+    telegram_id: int,
+    username: str | None,
+    first_name: str | None,
+    last_name: str | None,
+    kind: str,
+    device_kind: str,
+    slot_index: int,
+    base_email: str,
+    plan_days: int,
+    amount: int,
+    yookassa_payment_id: str,
+    confirmation_url: str | None,
+) -> PaymentRecord | None:
+    """Создаёт запись о платеже. Если у пользователя уже есть pending —
+    возвращает None (без записи).
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT 1 FROM payments
+            WHERE telegram_id = ? AND status = 'pending'
+            """,
+            (telegram_id,),
+        )
+        if await cur.fetchone():
+            return None
+        cur = await db.execute(
+            """
+            INSERT INTO payments (
+                telegram_id, username, first_name, last_name, kind,
+                device_kind, slot_index, base_email,
+                plan_days, amount, yookassa_payment_id, confirmation_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                telegram_id, username, first_name, last_name, kind,
+                device_kind, slot_index, base_email,
+                plan_days, amount, yookassa_payment_id, confirmation_url,
+            ),
+        )
+        new_id = cur.lastrowid
+        cur = await db.execute("SELECT * FROM payments WHERE id = ?", (new_id,))
+        row = await cur.fetchone()
+        await db.commit()
+    return _row_to_payment(row)
+
+
+async def get_payment_by_yookassa_id(yookassa_payment_id: str) -> PaymentRecord | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM payments WHERE yookassa_payment_id = ?",
+            (yookassa_payment_id,),
+        )
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    return _row_to_payment(row)
+
+
+async def get_active_payment(telegram_id: int) -> PaymentRecord | None:
+    """Возвращает текущий pending-платёж пользователя или None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT * FROM payments
+            WHERE telegram_id = ? AND status = 'pending'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (telegram_id,),
+        )
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    return _row_to_payment(row)
+
+
+async def mark_payment_paid(yookassa_payment_id: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE payments
+            SET status = 'succeeded', updated_at = datetime('now')
+            WHERE yookassa_payment_id = ? AND status = 'pending'
+            """,
+            (yookassa_payment_id,),
+        )
+        await db.commit()
+
+
+async def mark_payment_canceled(yookassa_payment_id: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE payments
+            SET status = 'canceled', updated_at = datetime('now')
+            WHERE yookassa_payment_id = ? AND status = 'pending'
+            """,
+            (yookassa_payment_id,),
+        )
+        await db.commit()
+
+
+async def delete_payment(yookassa_payment_id: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM payments WHERE yookassa_payment_id = ?",
+            (yookassa_payment_id,),
+        )
+        await db.commit()
+
+
+async def count_pending_payments() -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM payments WHERE status = 'pending'"
+        )
         row = await cur.fetchone()
     return int(row[0]) if row else 0
