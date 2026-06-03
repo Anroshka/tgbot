@@ -257,6 +257,59 @@ async def count_device_slots(telegram_id: int, device_kind: str) -> int:
     return int(row[0]) if row else 0
 
 
+async def count_user_devices(telegram_id: int) -> int:
+    """Сколько всего устройств (любых типов) у пользователя."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM user_devices WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+async def get_user_global_slot_index(
+    telegram_id: int, device_kind: str, slot_index: int
+) -> int | None:
+    """Глобальный порядковый номер слота у пользователя (1, 2, 3, ...).
+
+    Считается как «сколько у пользователя записей с id <= моего».
+    Слоты 1, 11, 21, ... — «ведущие» (платные) в десятках по 10.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT id FROM user_devices "
+            "WHERE telegram_id = ? AND device_kind = ? AND slot_index = ?",
+            (telegram_id, device_kind, slot_index),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        local_id = row[0]
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM user_devices WHERE telegram_id = ? AND id <= ?",
+            (telegram_id, local_id),
+        )
+        row = await cur.fetchone()
+    return int(row[0]) if row else None
+
+
+async def list_user_devices_in_group(
+    telegram_id: int, lead_global_slot: int
+) -> list[UserDeviceRecord]:
+    """Все user_devices пользователя, чей глобальный слот в одной десятке
+    с lead_global_slot. Например, для lead=1 вернёт слоты 1..10."""
+    group_start = lead_global_slot
+    group_end = lead_global_slot + 9
+    all_devices = await list_user_devices(telegram_id)
+    if not all_devices:
+        return []
+    if group_start > len(all_devices):
+        return []
+    upper = min(group_end, len(all_devices))
+    return all_devices[group_start - 1 : upper]
+
+
 async def create_user_device(
     telegram_id: int,
     device_kind: str,

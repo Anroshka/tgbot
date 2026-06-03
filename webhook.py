@@ -41,6 +41,7 @@ def _load_panel_helpers_from_main():
 
     return {
         "create_subscription": main._create_subscription_for_user,
+        "extend_subscription": main._extend_subscription_for_user,
         "all_links": main._all_links,
         "device_label": main._device_subscription_label_from_parts,
         "subscription_text": main._subscription_message_text,
@@ -53,15 +54,69 @@ HELPERS: dict[str, Any] = {}
 
 
 async def _process_succeeded(payment_record: db.PaymentRecord, bot) -> None:
-    """Платёж успешно оплачен → создаём подписку и уведомляем пользователя."""
+    """Платёж успешно оплачен → создаём/продлеваем подписку и уведомляем.
+
+    Для «новой» подписки (kind=new): создаём ОДИН слот.
+    Для «продления» (kind=renewal): продлеваем ВСЮ десятку, в которой
+    находится оплаченный слот (slot_index = ведущий 1, 11, 21, ...).
+    """
     helpers = HELPERS
     days = payment_record.plan_days
     tid = payment_record.telegram_id
+    is_renewal = payment_record.kind == "renewal"
 
     # Помечаем оплату в БД
     await db.mark_payment_paid(payment_record.yookassa_payment_id)
 
-    # Подписка
+    if is_renewal:
+        # Продление: продлеваем всю десятку
+        global_slot = await db.get_user_global_slot_index(
+            tid, payment_record.device_kind, payment_record.slot_index
+        )
+        if global_slot is None:
+            logger.error(
+                "Webhook: renewal — слот не найден tid=%s %s/%s",
+                tid,
+                payment_record.device_kind,
+                payment_record.slot_index,
+            )
+        else:
+            group_devices = await db.list_user_devices_in_group(tid, global_slot)
+            extend = helpers.get("extend_subscription")
+            if extend is None:
+                logger.error("Webhook: helpers.extend_subscription не зарегистрирован")
+            else:
+                renewed_count = 0
+                for dev in group_devices:
+                    ok, _, _ = await extend(
+                        tid=tid,
+                        device_kind=dev.device_kind,
+                        slot_index=dev.slot_index,
+                        days=days,
+                    )
+                    if ok:
+                        renewed_count += 1
+                logger.info(
+                    "Webhook: продлено %d/%d устройств в группе lead=%d для tid=%s",
+                    renewed_count,
+                    len(group_devices),
+                    global_slot,
+                    tid,
+                )
+        try:
+            label = helpers["device_label"](
+                payment_record.device_kind, payment_record.slot_index
+            )
+            await bot.send_message(
+                tid,
+                f"✅ Оплата получена! Продлены все устройства в группе "
+                f"(включая «{label}»).",
+            )
+        except Exception:
+            logger.exception("Webhook: не удалось уведомить %s", tid)
+        return
+
+    # kind=new: создаём ОДИН слот (как раньше)
     ok, sub, expiry_ms, err = await helpers["create_subscription"](
         tid=tid,
         base_email=payment_record.base_email,

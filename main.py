@@ -177,6 +177,14 @@ DEVICE_LABEL_RU = {
 REMINDER_3D_MS = 3 * 24 * 60 * 60 * 1000
 REMINDER_1D_MS = 1 * 24 * 60 * 60 * 1000
 REMINDER_CHECK_INTERVAL_SECONDS = 3600
+GROUP_SIZE = int(os.getenv("GROUP_SIZE", "10"))
+
+
+def is_lead_slot(global_slot_index: int) -> bool:
+    """«Ведущий» (платный) слот в группе: 1, 11, 21, ... → True."""
+    return global_slot_index == 1 or (global_slot_index - 1) % GROUP_SIZE == 0
+
+
 router = Router()
 
 
@@ -1290,6 +1298,43 @@ async def cb_renewal_plan_chosen(query: CallbackQuery, bot: Bot) -> None:
         await query.answer(ui.ERR_SUB_NOT_FOUND, show_alert=True)
         return
 
+    # Определяем глобальный номер слота и lead'а в его группе
+    global_slot = await db.get_user_global_slot_index(tid, device_kind, slot_index)
+    if global_slot is None:
+        await query.answer(ui.ERR_SUB_NOT_FOUND, show_alert=True)
+        return
+    lead_slot = ((global_slot - 1) // GROUP_SIZE) * GROUP_SIZE + 1
+
+    if not is_lead_slot(global_slot):
+        # Не ведущий слот → бесплатное продление всей десятки
+        renewed = await _extend_group_for_user(tid, lead_slot, days)
+        if renewed == 0:
+            await query.answer(ui.ERR_GENERIC, show_alert=True)
+            return
+        label = _device_subscription_label_from_parts(device_kind, slot_index)
+        text = (
+            f"🔁 <b>Подписка продлена</b>\n\n"
+            f"🛒 Тариф: <b>{days} дней</b>\n"
+            f"📱 Устройство: <b>{label}</b>\n\n"
+            f"✅ Бесплатно продлены все {renewed} устройств группы "
+            f"(слоты #{lead_slot}–#{lead_slot + GROUP_SIZE - 1})."
+        )
+        if query.message:
+            with suppress(Exception):
+                await query.message.edit_text(
+                    text,
+                    reply_markup=_subscription_reply_keyboard(
+                        sub_token=device.sub_token,
+                        device_label=label,
+                        device_kind=device_kind,
+                        slot_index=slot_index,
+                        show_renew=True,
+                    ),
+                    parse_mode="HTML",
+                )
+        await query.answer("Подписка продлена!", show_alert=True)
+        return
+
     record, err = await _create_payment_for_user(
         bot,
         kind="renewal",
@@ -1310,7 +1355,8 @@ async def cb_renewal_plan_chosen(query: CallbackQuery, bot: Bot) -> None:
         f"📱 Устройство: <b>{label}</b>\n"
         f"💵 К оплате: <b>{record.amount} ₽</b>\n\n"
         f"{ui.PAYMENT_CREATED}\n\n"
-        f"💡 Ссылку менять не нужно — после оплаты срок продлится автоматически."
+        f"💡 После оплаты автоматически продлятся все устройства группы "
+        f"#{lead_slot}–#{lead_slot + GROUP_SIZE - 1}."
     )
     if query.message:
         with suppress(Exception):
@@ -1532,6 +1578,21 @@ async def _extend_subscription_for_user(
     return True, new_expiry_ms, ""
 
 
+async def _extend_group_for_user(tid: int, lead_global_slot: int, days: int) -> int:
+    """Продлевает все user_devices пользователя в десятке lead_global_slot.
+    Возвращает количество успешно продлённых.
+    """
+    group_devices = await db.list_user_devices_in_group(tid, lead_global_slot)
+    renewed = 0
+    for dev in group_devices:
+        ok, _, _ = await _extend_subscription_for_user(
+            tid, dev.device_kind, dev.slot_index, days
+        )
+        if ok:
+            renewed += 1
+    return renewed
+
+
 @router.callback_query(F.data.startswith("rnw_apr:"))
 async def cb_renewal_approve(query: CallbackQuery, bot: Bot) -> None:
     # Удалено: продление теперь через оплату ЮKassa (webhook)
@@ -1619,6 +1680,48 @@ async def cb_plan_device_chosen(query: CallbackQuery, bot: Bot) -> None:
     n_same = await db.count_device_slots(query.from_user.id, kind)
     slot_index = n_same + 1
     base_email = _panel_base_email(nick, kind, slot_index)
+    tid = query.from_user.id
+
+    # Глобальный номер нового слота = сколько уже есть + 1
+    total_devices = await db.count_user_devices(tid)
+    new_global_slot = total_devices + 1
+    is_lead = is_lead_slot(new_global_slot)
+
+    if not is_lead:
+        # Не ведущий слот — выдаём бесплатно
+        ok, sub, expiry_ms, err_text = await _create_subscription_for_user(
+            tid=tid,
+            base_email=base_email,
+            device_kind=kind,
+            slot_index=slot_index,
+            days=days,
+        )
+        if not ok:
+            await query.answer(err_text or ui.ERR_GENERIC, show_alert=True)
+            return
+        label = _device_subscription_label_from_parts(kind, slot_index)
+        text = (
+            f"🎉 <b>Подписка активирована</b>\n\n"
+            f"🛒 Тариф: <b>{days} дней</b>\n"
+            f"📱 Устройство: <b>{label}</b>\n"
+            f"⏰ Действует до: <b>{_format_expiry_time_ms(expiry_ms)}</b>\n\n"
+            f"✅ Бесплатно (слот #{new_global_slot} в группе, ведущий слот — платный)."
+        )
+        if query.message:
+            with suppress(Exception):
+                await query.message.edit_text(
+                    text,
+                    reply_markup=_subscription_reply_keyboard(
+                        sub_token=sub,
+                        device_label=label,
+                        device_kind=kind,
+                        slot_index=slot_index,
+                        show_renew=True,
+                    ),
+                    parse_mode="HTML",
+                )
+        await query.answer("Подписка выдана!", show_alert=True)
+        return
 
     record, err = await _create_payment_for_user(
         bot,
@@ -1639,6 +1742,8 @@ async def cb_plan_device_chosen(query: CallbackQuery, bot: Bot) -> None:
         f"🛒 Тариф: <b>{days} дней</b>\n"
         f"📱 Устройство: <b>{label}</b>\n"
         f"💵 К оплате: <b>{record.amount} ₽</b>\n\n"
+        f"Слот #{new_global_slot} — ведущий в группе (платный).\n"
+        f"Следующие 9 слотов в этой группе — бесплатные.\n\n"
         f"{ui.PAYMENT_CREATED}"
     )
     if query.message:
