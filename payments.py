@@ -2,6 +2,7 @@
 
 Зависимости: yookassa (pip install yookassa)
 """
+
 from __future__ import annotations
 
 import logging
@@ -48,10 +49,6 @@ def get_return_url() -> str:
     return os.getenv("YOOKASSA_RETURN_URL", "").strip() or "https://t.me/"
 
 
-# --- Цены тарифов ---------------------------------------------------------
-# Берутся из .env: PLAN_PRICE_7=350, PLAN_PRICE_30=800, ...
-# Если в .env не задано — берётся дефолт из DEFAULT_PLAN_PRICES ниже.
-
 DEFAULT_PLAN_PRICES: dict[int, int] = {
     7: 30,
     30: 80,
@@ -80,8 +77,6 @@ def plan_amount(days: int) -> int:
     return prices[days]
 
 
-# --- SDK lazy import -------------------------------------------------------
-
 def _sdk():
     """Импорт SDK внутри функции, чтобы модуль грузился только при необходимости."""
     try:
@@ -98,15 +93,12 @@ def _sdk():
     return Configuration
 
 
-# --- Создание платежа ------------------------------------------------------
-
-
 def _receipt_item(days: int, amount: int, *, email: str | None) -> dict[str, Any]:
     item: dict[str, Any] = {
         "description": f"Предоставление защищённого канала связи (VPN) на {days} дней",
         "quantity": "1.00",
         "amount": {"value": f"{amount}.00", "currency": "RUB"},
-        "vat_code": 1,            # Без НДС
+        "vat_code": 1,  # Без НДС
         "payment_mode": "FULL_PAYMENT",
         "payment_subject": "SERVICE",
     }
@@ -146,7 +138,9 @@ def create_payment(
 
     _sdk()
     if not idempotence_key:
-        idempotence_key = f"tg-{telegram_id}-{device_kind}-{slot_index}-{days}-{uuid.uuid4().hex[:8]}"
+        idempotence_key = (
+            f"tg-{telegram_id}-{device_kind}-{slot_index}-{days}-{uuid.uuid4().hex[:8]}"
+        )
 
     description = f"Подписка Vibecode VPN на {days} дней"
     return_url = get_return_url()

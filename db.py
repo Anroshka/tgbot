@@ -698,9 +698,6 @@ async def count_pending_renewals() -> int:
     return int(row[0]) if row else 0
 
 
-# --- Платежи ЮKassa -------------------------------------------------------
-
-
 def _row_to_payment(row) -> PaymentRecord:
     return PaymentRecord(
         id=row["id"],
@@ -759,9 +756,18 @@ async def try_create_payment(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                telegram_id, username, first_name, last_name, kind,
-                device_kind, slot_index, base_email,
-                plan_days, amount, yookassa_payment_id, confirmation_url,
+                telegram_id,
+                username,
+                first_name,
+                last_name,
+                kind,
+                device_kind,
+                slot_index,
+                base_email,
+                plan_days,
+                amount,
+                yookassa_payment_id,
+                confirmation_url,
             ),
         )
         new_id = cur.lastrowid
@@ -839,8 +845,6 @@ async def delete_payment(yookassa_payment_id: str) -> None:
 
 async def count_pending_payments() -> int:
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "SELECT COUNT(*) FROM payments WHERE status = 'pending'"
-        )
+        cur = await db.execute("SELECT COUNT(*) FROM payments WHERE status = 'pending'")
         row = await cur.fetchone()
     return int(row[0]) if row else 0

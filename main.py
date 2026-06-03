@@ -546,9 +546,7 @@ async def _notify_admins_new_payment(bot: Bot, record: db.PaymentRecord) -> None
         try:
             await bot.send_message(admin_id, text, parse_mode="HTML")
         except Exception:
-            logger.exception(
-                "Не удалось уведомить админа %s о платеже", admin_id
-            )
+            logger.exception("Не удалось уведомить админа %s о платеже", admin_id)
 
 
 async def _create_subscription_for_user(
@@ -1258,11 +1256,7 @@ async def cb_renewal_request(query: CallbackQuery, bot: Bot) -> None:
     if row:
         rows.append(row)
     rows.append(
-        [
-            InlineKeyboardButton(
-                text=ui.BTN_BACK_SUBS, callback_data="menu_my_subs"
-            )
-        ]
+        [InlineKeyboardButton(text=ui.BTN_BACK_SUBS, callback_data="menu_my_subs")]
     )
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
     text = f"🔁 <b>Продление подписки</b>\n\n{ui.plan_selection()}"
@@ -1362,9 +1356,7 @@ def _device_inline_keyboard_for_plan(days: int) -> InlineKeyboardMarkup:
             ),
         ],
         [
-            InlineKeyboardButton(
-                text="🖥 ПК", callback_data=f"plan_dev:{days}:pc"
-            ),
+            InlineKeyboardButton(text="🖥 ПК", callback_data=f"plan_dev:{days}:pc"),
             InlineKeyboardButton(
                 text="📟 Другое", callback_data=f"plan_dev:{days}:other"
             ),
@@ -1680,9 +1672,14 @@ async def cb_pay_check(query: CallbackQuery) -> None:
         await query.answer("Не удалось проверить. Попробуйте позже.", show_alert=True)
         return
     if info["status"] == "succeeded":
-        await query.answer("Оплата прошла! Подписка активируется через пару секунд ✅", show_alert=True)
+        await query.answer(
+            "Оплата прошла! Подписка активируется через пару секунд ✅", show_alert=True
+        )
     else:
-        await query.answer(f"Статус: {info['status']}. Если платили — подождите немного.", show_alert=True)
+        await query.answer(
+            f"Статус: {info['status']}. Если платили — подождите немного.",
+            show_alert=True,
+        )
 
 
 @router.callback_query(F.data.startswith("pay_cancel:"))
@@ -1705,8 +1702,8 @@ async def cb_pay_cancel(query: CallbackQuery) -> None:
     if query.message:
         with suppress(Exception):
             await query.message.edit_text(
-                f"❌ Счёт отменён.\n\n"
-                f"Когда захотите — нажмите «🚀 Получить VPN» и оформите заново.",
+                "❌ Счёт отменён.\n\n"
+                "Когда захотите — нажмите «🚀 Получить VPN» и оформите заново.",
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
                         [

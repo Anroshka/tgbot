@@ -51,9 +51,7 @@ def device_selection(*, approval: bool) -> str:
 
 
 def plan_selection() -> str:
-    return (
-        "📅 <b>Выберите срок подписки:</b>\n\n"
-    )
+    return "📅 <b>Выберите срок подписки:</b>\n\n"
 
 
 def plan_prices(prices: dict[int, int]) -> str:
@@ -101,7 +99,9 @@ ERR_REQUEST_SENT = (
 ERR_REQUEST_ALREADY = "⏳ У вас уже есть неоплаченный счёт. Завершите или отмените его."
 ERR_BAD_DATA = "🤔 Кнопка устарела. Нажмите /start"
 ERR_SUB_NOT_FOUND = "🔍 Подписка не найдена. Откройте «Мои подписки»."
-ERR_RENEW_PENDING = "⏳ Продление уже в работе — оплатите текущий счёт или отмените его."
+ERR_RENEW_PENDING = (
+    "⏳ Продление уже в работе — оплатите текущий счёт или отмените его."
+)
 RENEWAL_PENDING_NOTE = "⏳ Ожидаем оплату продления…"
 RENEWAL_SENT_ALERT = "✅ Счёт на продление создан!"
 RENEWAL_SENT_BODY = (
@@ -157,7 +157,6 @@ ADMIN_NEW_PAYMENT = (
 )
 ADMIN_MSG_PREFIX = "💬 <b>Сообщение от поддержки</b>\n\n"
 
-# --- ЮKassa: новые тексты и кнопки ---
 BTN_CHOOSE_PLAN = "📅 Выбрать срок"
 BTN_PLAN_PREFIX = "📅 {days} дн. — {amount} ₽"
 BTN_PAY = "💳 Оплатить {amount} ₽"
@@ -166,10 +165,10 @@ BTN_CANCEL_PAYMENT = "❌ Отменить счёт"
 BTN_BACK_TO_PLANS = "◀️ К выбору срока"
 
 PAYMENT_CREATED = "✅ Счёт создан. Оплатите в течение 30 минут."
-PAYMENT_SUCCEEDED_HEADER = "🎉 <b>Оплата прошла!</b>\n\nДоступ активирован — ссылка на подписку ниже 👇"
-PAYMENT_FAILED = (
-    "😔 Оплата не прошла. Попробуйте снова или напишите в поддержку."
+PAYMENT_SUCCEEDED_HEADER = (
+    "🎉 <b>Оплата прошла!</b>\n\nДоступ активирован — ссылка на подписку ниже 👇"
 )
+PAYMENT_FAILED = "😔 Оплата не прошла. Попробуйте снова или напишите в поддержку."
 PAYMENT_EXPIRED = (
     "⏰ Время на оплату вышло.\n\nНажмите «🚀 Получить VPN» и оформите заново."
 )

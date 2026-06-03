@@ -7,6 +7,7 @@
 При payment.succeeded — создаём клиента в 3x-ui и отправляем пользователю ссылку.
 При payment.canceled — уведомляем пользователя, что оплата не прошла.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -19,7 +20,7 @@ from dotenv import load_dotenv
 
 import db
 import payments
-from bot_ui import PAYMENT_CANCELED, PAYMENT_EXPIRED, PAYMENT_FAILED, PAYMENT_SUCCEEDED_HEADER
+from bot_ui import PAYMENT_CANCELED, PAYMENT_FAILED, PAYMENT_SUCCEEDED_HEADER
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -27,8 +28,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
-
-# --------- Подключение к боту и панели (те же helpers, что в main.py) --------
 
 def _load_panel_helpers_from_main():
     """Импортируем из main.py функции создания подписки и формирования текста.
@@ -53,8 +52,6 @@ def _load_panel_helpers_from_main():
 HELPERS: dict[str, Any] = {}
 
 
-# --------- Обработка вебхука ----------
-
 async def _process_succeeded(payment_record: db.PaymentRecord, bot) -> None:
     """Платёж успешно оплачен → создаём подписку и уведомляем пользователя."""
     helpers = HELPERS
@@ -75,7 +72,9 @@ async def _process_succeeded(payment_record: db.PaymentRecord, bot) -> None:
     if not ok or sub is None or expiry_ms is None:
         logger.error(
             "Webhook: не удалось создать подписку для tid=%s payment=%s: %s",
-            tid, payment_record.yookassa_payment_id, err,
+            tid,
+            payment_record.yookassa_payment_id,
+            err,
         )
         try:
             await bot.send_message(
@@ -88,7 +87,9 @@ async def _process_succeeded(payment_record: db.PaymentRecord, bot) -> None:
             logger.exception("Webhook: не удалось уведомить пользователя %s", tid)
         return
 
-    label = helpers["device_label"](payment_record.device_kind, payment_record.slot_index)
+    label = helpers["device_label"](
+        payment_record.device_kind, payment_record.slot_index
+    )
     links = helpers["all_links"](sub)
     text = helpers["subscription_text"](label, expiry_ms, links)
     text = f"{PAYMENT_SUCCEEDED_HEADER}\n\n{text}"
@@ -170,9 +171,7 @@ async def _handle_health(_: web.Request) -> web.Response:
 async def main() -> None:
     load_dotenv()
     if not payments.is_configured():
-        raise SystemExit(
-            "Задайте YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY в .env"
-        )
+        raise SystemExit("Задайте YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY в .env")
 
     await db.init_db()
 
