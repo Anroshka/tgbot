@@ -151,16 +151,22 @@ async def _process_succeeded(payment_record: db.PaymentRecord, bot) -> None:
     if not ok or sub is None or expiry_ms is None:
         logger.error(
             "Webhook: не удалось создать подписку для tid=%s payment=%s: %s",
-            tid,
-            payment_record.yookassa_payment_id,
-            err,
+            tid, payment_record.yookassa_payment_id, err,
         )
         try:
+            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
             await bot.send_message(
                 tid,
                 f"✅ Оплата получена, но при активации возникла ошибка.\n"
                 f"Админ уже разбирается — скоро всё заработает.\n\n"
                 f"Ошибка: {err or 'неизвестно'}",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(
+                            text="🏠 Главное меню", callback_data="menu_main"
+                        )]
+                    ]
+                ),
             )
         except Exception:
             logger.exception("Webhook: не удалось уведомить пользователя %s", tid)
