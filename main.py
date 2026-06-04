@@ -714,6 +714,47 @@ async def _subscription_reminder_worker(bot: Bot) -> None:
         await asyncio.sleep(REMINDER_CHECK_INTERVAL_SECONDS)
 
 
+async def _expire_old_payments_worker(bot: Bot) -> None:
+    """Фоновая отмена «зависших» pending-платежей.
+
+    Если юзер создал счёт и ушёл (не нажал «Отменить» и не оплатил),
+    через PAYMENT_EXPIRES_SECONDS переводим запись в canceled,
+    чтобы она не блокировала get_active_payment().
+    """
+    check_interval = 60
+    while True:
+        try:
+            expired = await db.expire_old_pending_payments(
+                payments.PAYMENT_EXPIRES_SECONDS
+            )
+            for rec in expired:
+                # Гасим счёт и на стороне ЮKassa, чтобы по старой ссылке
+                # нельзя было заплатить уже после авто-отмены в БД.
+                try:
+                    await asyncio.to_thread(
+                        payments.cancel_payment, rec.yookassa_payment_id
+                    )
+                except Exception:
+                    logger.exception(
+                        "Не удалось отменить счёт %s в ЮKassa",
+                        rec.yookassa_payment_id,
+                    )
+                try:
+                    await bot.send_message(
+                        rec.telegram_id,
+                        "⏰ Счёт на оплату истёк. Вы можете оформить новый.",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Не удалось уведомить %s об истечении счёта", rec.telegram_id
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Ошибка фоновой отмены просроченных платежей")
+        await asyncio.sleep(check_interval)
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     # Очищаем Reply-клавиатуру, если она была у пользователя
@@ -866,6 +907,7 @@ async def cb_menu_get_access(query: CallbackQuery) -> None:
             lead_dev = await db.get_user_device_by_global_slot(tid, lead_global)
             if lead_dev and lead_dev.expiry_time_ms:
                 from datetime import datetime, timezone
+
                 now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
                 remaining_days = max(
                     1, (lead_dev.expiry_time_ms - now_ms) // (24 * 60 * 60 * 1000)
@@ -1631,21 +1673,6 @@ async def _extend_subscription_for_user(
     return True, new_expiry_ms, ""
 
 
-async def _extend_group_for_user(tid: int, lead_global_slot: int, days: int) -> int:
-    """Продлевает все user_devices пользователя в десятке lead_global_slot.
-    Возвращает количество успешно продлённых.
-    """
-    group_devices = await db.list_user_devices_in_group(tid, lead_global_slot)
-    renewed = 0
-    for dev in group_devices:
-        ok, _, _ = await _extend_subscription_for_user(
-            tid, dev.device_kind, dev.slot_index, days
-        )
-        if ok:
-            renewed += 1
-    return renewed
-
-
 @router.callback_query(F.data.startswith("rnw_apr:"))
 async def cb_renewal_approve(query: CallbackQuery, bot: Bot) -> None:
     # Удалено: продление теперь через оплату ЮKassa (webhook)
@@ -1698,8 +1725,7 @@ async def cb_plan_chosen(query: CallbackQuery) -> None:
     if not is_lead_slot(new_global):
         with suppress(Exception):
             await query.message.edit_text(
-                "Слот бесплатный — срок возьмётся от ведущего. "
-                "Выберите устройство:",
+                "Слот бесплатный — срок возьмётся от ведущего. Выберите устройство:",
                 reply_markup=_device_inline_keyboard_for_additional(),
                 parse_mode="HTML",
             )
@@ -1822,7 +1848,14 @@ async def cb_add_device_chosen(query: CallbackQuery, bot: Bot) -> None:
 
     lead_global = ((new_global_slot - 1) // GROUP_SIZE) * GROUP_SIZE + 1
     lead_dev = await db.get_user_device_by_global_slot(tid, lead_global)
-    if lead_dev is None or lead_dev.expiry_time_ms is None:
+    from datetime import datetime, timezone
+
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    if (
+        lead_dev is None
+        or lead_dev.expiry_time_ms is None
+        or lead_dev.expiry_time_ms <= now_ms
+    ):
         await query.answer(
             "Сначала нужно продлить ведущий слот группы.",
             show_alert=True,
@@ -2017,13 +2050,17 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(router)
     reminder_task = asyncio.create_task(_subscription_reminder_worker(bot))
+    expire_task = asyncio.create_task(_expire_old_payments_worker(bot))
     logger.info("Бот запущен (panel_api build=%s)", PANEL_API_BUILD)
     try:
         await dp.start_polling(bot)
     finally:
         reminder_task.cancel()
+        expire_task.cancel()
         with suppress(asyncio.CancelledError):
             await reminder_task
+        with suppress(asyncio.CancelledError):
+            await expire_task
 
 
 if __name__ == "__main__":

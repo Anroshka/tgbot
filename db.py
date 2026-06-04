@@ -27,17 +27,6 @@ class UserDeviceRecord:
 
 
 @dataclass(frozen=True)
-class RenewalRequestRecord:
-    telegram_id: int
-    username: str | None
-    first_name: str | None
-    last_name: str | None
-    device_kind: str
-    slot_index: int
-    current_expiry_time_ms: int | None
-
-
-@dataclass(frozen=True)
 class AccessRequestRecord:
     telegram_id: int
     username: str | None
@@ -447,18 +436,15 @@ async def list_users_legal_status() -> list[dict]:
     """Возвращает список всех пользователей с их статусом принятия правил и ником."""
     async with aiosqlite.connect(DB_PATH) as db:
         # Собираем всех, кто есть в user_devices или terms_acceptance
-        # Пытаемся достать username из renewal_requests или access_requests
+        # username берём из access_requests
         cur = await db.execute(
             """
-            SELECT 
-                u.telegram_id, 
-                t.accepted_at, 
+            SELECT
+                u.telegram_id,
+                t.accepted_at,
                 t.agreement_accepted_at,
                 (SELECT COUNT(*) FROM user_devices WHERE telegram_id = u.telegram_id) as device_count,
-                COALESCE(
-                    (SELECT username FROM renewal_requests WHERE telegram_id = u.telegram_id LIMIT 1),
-                    (SELECT username FROM access_requests WHERE telegram_id = u.telegram_id LIMIT 1)
-                ) as username
+                (SELECT username FROM access_requests WHERE telegram_id = u.telegram_id LIMIT 1) as username
             FROM (
                 SELECT telegram_id FROM user_devices
                 UNION
@@ -677,88 +663,9 @@ async def extend_device_expiry(
         await db.commit()
 
 
-async def try_insert_renewal_request(
-    telegram_id: int,
-    device_kind: str,
-    slot_index: int,
-    username: str | None,
-    first_name: str | None,
-    last_name: str | None,
-) -> bool:
-    """True — новая заявка на продление. False — уже есть активная."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            """
-            SELECT 1 FROM renewal_requests
-            WHERE telegram_id = ? AND device_kind = ? AND slot_index = ?
-            """,
-            (telegram_id, device_kind, slot_index),
-        )
-        if await cur.fetchone():
-            return False
-        await db.execute(
-            """
-            INSERT INTO renewal_requests
-                (telegram_id, device_kind, slot_index, username, first_name, last_name)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (telegram_id, device_kind, slot_index, username, first_name, last_name),
-        )
-        await db.commit()
-    return True
-
-
-async def get_renewal_request(
-    telegram_id: int, device_kind: str, slot_index: int
-) -> RenewalRequestRecord | None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cur = await db.execute(
-            """
-            SELECT r.telegram_id, r.username, r.first_name, r.last_name,
-                   r.device_kind, r.slot_index, d.expiry_time_ms
-            FROM renewal_requests r
-            LEFT JOIN user_devices d
-              ON d.telegram_id = r.telegram_id
-             AND d.device_kind = r.device_kind
-             AND d.slot_index = r.slot_index
-            WHERE r.telegram_id = ? AND r.device_kind = ? AND r.slot_index = ?
-            """,
-            (telegram_id, device_kind, slot_index),
-        )
-        row = await cur.fetchone()
-    if row is None:
-        return None
-    return RenewalRequestRecord(
-        telegram_id=row["telegram_id"],
-        username=row["username"],
-        first_name=row["first_name"],
-        last_name=row["last_name"],
-        device_kind=row["device_kind"],
-        slot_index=row["slot_index"],
-        current_expiry_time_ms=row["expiry_time_ms"],
-    )
-
-
-async def delete_renewal_request(
-    telegram_id: int, device_kind: str, slot_index: int
-) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
-            DELETE FROM renewal_requests
-            WHERE telegram_id = ? AND device_kind = ? AND slot_index = ?
-            """,
-            (telegram_id, device_kind, slot_index),
-        )
-        await db.commit()
-
-
-async def count_pending_renewals() -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT COUNT(*) FROM renewal_requests")
-        row = await cur.fetchone()
-    return int(row[0]) if row else 0
+async def try_insert_renewal_request(*args, **kwargs) -> bool:  # noqa: D401
+    """Заглушка: продление теперь через оплату, ручные заявки не нужны."""
+    return False
 
 
 def _row_to_payment(row) -> PaymentRecord:
@@ -895,6 +802,39 @@ async def mark_payment_canceled(yookassa_payment_id: str) -> None:
             (yookassa_payment_id,),
         )
         await db.commit()
+
+
+async def expire_old_pending_payments(expires_seconds: int) -> list:
+    """Помечает просроченные pending-платежи как canceled, возвращает их.
+
+    Фоновая задача вызывает это раз в минуту, чтобы зависшие
+    (юзер создал счёт и ушёл) не блокировали get_active_payment.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=expires_seconds)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT * FROM payments
+            WHERE status = 'pending' AND created_at < ?
+            """,
+            (cutoff,),
+        )
+        rows = await cur.fetchall()
+        await db.execute(
+            """
+            UPDATE payments
+            SET status = 'canceled', updated_at = datetime('now')
+            WHERE status = 'pending' AND created_at < ?
+            """,
+            (cutoff,),
+        )
+        await db.commit()
+    return [_row_to_payment(r) for r in rows]
 
 
 async def delete_payment(yookassa_payment_id: str) -> None:
