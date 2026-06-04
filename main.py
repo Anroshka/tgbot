@@ -853,11 +853,37 @@ async def cb_menu_get_access(query: CallbackQuery) -> None:
         return
 
     with suppress(Exception):
-        await query.message.edit_text(
-            ui.device_selection(approval=True),
-            reply_markup=_plan_inline_keyboard(),
-            parse_mode="HTML",
-        )
+        total_devices = await db.count_user_devices(tid)
+        new_global = total_devices + 1
+        if is_lead_slot(new_global):
+            await query.message.edit_text(
+                ui.device_selection(approval=True),
+                reply_markup=_plan_inline_keyboard(),
+                parse_mode="HTML",
+            )
+        else:
+            lead_global = ((new_global - 1) // GROUP_SIZE) * GROUP_SIZE + 1
+            lead_dev = await db.get_user_device_by_global_slot(tid, lead_global)
+            if lead_dev and lead_dev.expiry_time_ms:
+                from datetime import datetime, timezone
+                now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                remaining_days = max(
+                    1, (lead_dev.expiry_time_ms - now_ms) // (24 * 60 * 60 * 1000)
+                )
+            else:
+                remaining_days = 30
+            text = (
+                f"➕ <b>Добавление устройства</b>\n\n"
+                f"Слот #{new_global} (бесплатный в группе).\n"
+                f"Срок привязан к ведущему слоту #{lead_global}: "
+                f"<b>{remaining_days} дн.</b>\n\n"
+                f"👇 <b>Выберите устройство:</b>"
+            )
+            await query.message.edit_text(
+                text,
+                reply_markup=_device_inline_keyboard_for_additional(),
+                parse_mode="HTML",
+            )
     await query.answer()
 
 
@@ -1665,6 +1691,21 @@ async def cb_plan_chosen(query: CallbackQuery) -> None:
     if not _panels_configured():
         await query.answer(ui.ERR_NO_PANEL, show_alert=True)
         return
+
+    # Если новый слот не lead — тариф не нужен, сразу выбор устройства
+    total_devices = await db.count_user_devices(query.from_user.id)
+    new_global = total_devices + 1
+    if not is_lead_slot(new_global):
+        with suppress(Exception):
+            await query.message.edit_text(
+                "Слот бесплатный — срок возьмётся от ведущего. "
+                "Выберите устройство:",
+                reply_markup=_device_inline_keyboard_for_additional(),
+                parse_mode="HTML",
+            )
+        await query.answer()
+        return
+
     text = (
         f"{ui.device_selection(approval=True)}\n\n"
         f"🛒 <b>Тариф:</b> {days} дней — <b>{prices[days]} ₽</b>\n\n"
